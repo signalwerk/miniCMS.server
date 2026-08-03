@@ -1,7 +1,6 @@
 import path from "node:path";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
-const GITHUB_LOGIN_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/i;
 
 function configurationError(message) {
   const error = new Error(message);
@@ -54,21 +53,6 @@ function parseOrigin(value, name, { httpsOnly = false } = {}) {
   return url.origin;
 }
 
-function parseAdminOrigins(value) {
-  const parts = value.split(",").map((entry) => entry.trim());
-  if (!parts.length || parts.some((entry) => !entry)) {
-    throw configurationError(
-      "MINICMS_ADMIN_ORIGINS must contain exact comma-separated origins."
-    );
-  }
-  const origins = parts.map((entry, index) =>
-    parseOrigin(entry, `MINICMS_ADMIN_ORIGINS entry ${index + 1}`, {
-      httpsOnly: true
-    })
-  );
-  return Object.freeze([...new Set(origins)]);
-}
-
 function commonConfiguration(environment, projectRoot) {
   return {
     rootDir: path.resolve(
@@ -102,9 +86,6 @@ function productionConfiguration({
     "MINICMS_PUBLIC_URL",
     { httpsOnly: true }
   );
-  const adminOrigins = parseAdminOrigins(
-    requiredEnvironmentValue(environment, "MINICMS_ADMIN_ORIGINS")
-  );
   const githubClientId = requiredEnvironmentValue(
     environment,
     "MINICMS_GITHUB_CLIENT_ID"
@@ -113,15 +94,6 @@ function productionConfiguration({
     environment,
     "MINICMS_GITHUB_CLIENT_SECRET"
   );
-  const allowedLogin = requiredEnvironmentValue(
-    environment,
-    "MINICMS_GITHUB_ALLOWED_LOGIN"
-  );
-  if (!GITHUB_LOGIN_PATTERN.test(allowedLogin)) {
-    throw configurationError(
-      "MINICMS_GITHUB_ALLOWED_LOGIN must contain exactly one valid GitHub login."
-    );
-  }
   const sessionSecret = requiredEnvironmentValue(
     environment,
     "MINICMS_SESSION_SECRET"
@@ -135,10 +107,8 @@ function productionConfiguration({
   return Object.freeze({
     ...configuration,
     publicUrl,
-    adminOrigins,
     githubClientId,
     githubClientSecret,
-    allowedLogin,
     sessionSecret
   });
 }

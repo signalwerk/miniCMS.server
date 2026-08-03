@@ -7,8 +7,9 @@ serves, or imports the React editor.
 
 - `src/app.mjs` owns the existing config, complete-record YAML, collection,
   upload, rename, delete, and public-media HTTP behavior.
-- `src/auth.mjs` owns exact-origin CORS, GitHub OAuth with PKCE, one-time code
-  exchange, in-memory bearer sessions, and authorization middleware.
+- `src/auth.mjs` owns wildcard production CORS, GitHub OAuth with PKCE,
+  one-time origin-bound code exchange, in-memory bearer sessions, and
+  authorization middleware.
 - `src/config.mjs` is the fail-closed environment and command configuration
   boundary.
 - `src/image/` owns the public Sharp derivative service: `config.mjs` reads
@@ -29,15 +30,18 @@ serves, or imports the React editor.
   dependency that breaks independent builds.
 - `Dockerfile` is the production image boundary. `docker-compose.yml` is
   Coolify-ready, exposes only container port 8787, and mounts the single
-  durable project root from `/DATA/miniCMS/backend/data` to `/data`.
+  durable project root from `/DATA/miniCMS/backend/data` to `/data`. The
+  runtime is non-root with a read-only container filesystem; only `/data` and
+  the bounded `/tmp` tmpfs are writable.
 
 ## Security invariants
 
 - `dev` must refuse non-loopback hosts. `start` must never provide an
   unauthenticated fallback and must validate every required setting before
   listening.
-- Only the single server-configured GitHub login may authenticate. Never trust
-  an allowed login, provider, or OAuth endpoint from consumer YAML.
+- Only the hard-coded GitHub login `signalwerk` may authenticate. Never trust
+  an allowed login, provider, or OAuth endpoint from environment variables or
+  consumer YAML.
 - GitHub tokens and the GitHub client secret never cross to the browser, logs,
   callback HTML, exchange responses, or persisted files.
 - OAuth state is unpredictable and single-use. Exchange codes are bound to the
@@ -99,11 +103,12 @@ serves, or imports the React editor.
   255-byte component limit and preserve per-record file ownership for
   `delete_files_with_record`. On first upload, remove only strictly named stale
   upload temporaries left by an interrupted prior single-replica process.
-- Authenticated API CORS allows configured exact HTTPS origins only, never `*`
-  or credential cookies. The public curated image-info route is the deliberate
-  wildcard exception.
-  Authentication responses retain no-store, nosniff, CSP, and no-referrer
-  protections.
+- Production API CORS deliberately uses `Access-Control-Allow-Origin: *` and
+  never credential cookies; every content operation still requires an opaque
+  bearer issued only after `signalwerk` authenticates. OAuth start accepts any
+  canonical HTTP(S) browser origin, while callback delivery and one-time code
+  exchange remain bound to that exact origin and client nonce. Authentication
+  responses retain no-store, nosniff, CSP, and no-referrer protections.
 - Unauthenticated development accepts browser API requests only from loopback
   origins; origin-less CLI requests remain valid.
 

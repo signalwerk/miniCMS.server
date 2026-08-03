@@ -13,6 +13,7 @@ const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const GITHUB_USER_URL = "https://api.github.com/user";
 const GITHUB_API_VERSION = "2022-11-28";
+const ALLOWED_GITHUB_LOGIN = "signalwerk";
 const NONCE_PATTERN = /^[a-zA-Z0-9_-]{16,256}$/;
 const BEARER_PATTERN = /^[a-zA-Z0-9_-]{32,256}$/;
 const MAX_PENDING_STATES = 512;
@@ -86,6 +87,21 @@ function authSecurityHeaders(_request, response, next) {
   next();
 }
 
+function browserOrigin(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return (
+    ["http:", "https:"].includes(url.protocol) &&
+    !url.username &&
+    !url.password &&
+    value === url.origin
+  );
+}
+
 function loopbackOrigin(value) {
   let origin;
   try {
@@ -153,10 +169,8 @@ function createDevelopmentAuthentication() {
 function createProductionAuthentication(
   {
     publicUrl,
-    adminOrigins,
     githubClientId,
     githubClientSecret,
-    allowedLogin,
     sessionSecret
   },
   {
@@ -165,7 +179,6 @@ function createProductionAuthentication(
     randomBytes = cryptographicRandomBytes
   } = {}
 ) {
-  const allowedOrigins = new Set(adminOrigins);
   const pendingStates = new Map();
   const exchangeCodes = new Map();
   const sessions = new Map();
@@ -198,24 +211,13 @@ function createProductionAuthentication(
     if (request.path.startsWith("/auth/")) {
       setAuthSecurityHeaders(response);
     }
-    const origin = request.get("origin");
-    if (origin) {
-      if (!allowedOrigins.has(origin)) {
-        next(httpError(403, "This admin origin is not allowed."));
-        return;
-      }
-      response.set("access-control-allow-origin", origin);
-      response.vary("Origin");
-      response.set(
-        "access-control-allow-headers",
-        "Authorization, Content-Type"
-      );
-      response.set(
-        "access-control-allow-methods",
-        "GET, POST, PUT, DELETE, OPTIONS"
-      );
-      response.set("access-control-max-age", "600");
-    }
+    response.set({
+      "access-control-allow-origin": "*",
+      "access-control-allow-headers": "Authorization, Content-Type",
+      "access-control-allow-methods":
+        "DELETE, GET, HEAD, OPTIONS, POST, PUT",
+      "access-control-max-age": "600"
+    });
     if (request.method === "OPTIONS") {
       response.status(204).end();
       return;
@@ -314,7 +316,7 @@ function createProductionAuthentication(
     if (!userResponse.ok || typeof user?.login !== "string") {
       throw httpError(502, "GitHub authentication failed.");
     }
-    if (user.login.toLowerCase() !== allowedLogin.toLowerCase()) {
+    if (user.login.toLowerCase() !== ALLOWED_GITHUB_LOGIN) {
       throw httpError(403, "This GitHub account is not allowed.");
     }
     return {
@@ -358,8 +360,8 @@ function createProductionAuthentication(
       pruneExpired();
       const origin = String(request.query.origin || "");
       const nonce = String(request.query.nonce || "");
-      if (!allowedOrigins.has(origin)) {
-        throw httpError(403, "This admin origin is not allowed.");
+      if (!browserOrigin(origin)) {
+        throw httpError(400, "A valid browser origin is required.");
       }
       if (!NONCE_PATTERN.test(nonce)) {
         throw httpError(400, "A valid authentication nonce is required.");

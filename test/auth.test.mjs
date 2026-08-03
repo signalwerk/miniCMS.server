@@ -17,6 +17,7 @@ import {
 } from "../src/config.mjs";
 
 const ADMIN_ORIGIN = "https://admin.example";
+const SECOND_ADMIN_ORIGIN = "https://another-admin.example:8443";
 const PUBLIC_URL = "https://api.example";
 const GITHUB_ACCESS_TOKEN = "github-access-token-that-must-stay-server-side";
 
@@ -25,10 +26,8 @@ function validEnvironment(overrides = {}) {
     HOST: "127.0.0.1",
     PORT: "8787",
     MINICMS_PUBLIC_URL: PUBLIC_URL,
-    MINICMS_ADMIN_ORIGINS: ADMIN_ORIGIN,
     MINICMS_GITHUB_CLIENT_ID: "github-client-id",
     MINICMS_GITHUB_CLIENT_SECRET: "github-client-secret",
-    MINICMS_GITHUB_ALLOWED_LOGIN: "signalwer",
     MINICMS_SESSION_SECRET: "a-test-session-secret-with-at-least-32-characters",
     ...overrides
   };
@@ -78,7 +77,7 @@ function deterministicRandomBytes() {
   };
 }
 
-function githubFetch({ login = "SignalWer" } = {}) {
+function githubFetch({ login = "SignalWerk" } = {}) {
   const calls = [];
   const fetchImpl = async (input, options = {}) => {
     const url = String(input);
@@ -93,7 +92,7 @@ function githubFetch({ login = "SignalWer" } = {}) {
       );
       return Response.json({
         login,
-        avatar_url: "https://avatars.example/signalwer.png"
+        avatar_url: "https://avatars.example/signalwerk.png"
       });
     }
     throw new Error(`Unexpected GitHub request: ${url}`);
@@ -103,7 +102,7 @@ function githubFetch({ login = "SignalWer" } = {}) {
 
 async function withProductionServer(
   run,
-  { login = "SignalWer", clock = { value: Date.parse("2026-08-02T12:00:00Z") } } = {}
+  { login = "SignalWerk", clock = { value: Date.parse("2026-08-02T12:00:00Z") } } = {}
 ) {
   const rootDir = await makeFixture();
   const github = githubFetch({ login });
@@ -127,13 +126,13 @@ async function withProductionServer(
   }
 }
 
-async function beginAuthentication(baseUrl, nonce) {
+async function beginAuthentication(baseUrl, nonce, origin = ADMIN_ORIGIN) {
   const url = new URL("/api/auth/github/start", baseUrl);
-  url.searchParams.set("origin", ADMIN_ORIGIN);
+  url.searchParams.set("origin", origin);
   url.searchParams.set("nonce", nonce);
   const response = await fetch(url, {
     redirect: "manual",
-    headers: { origin: ADMIN_ORIGIN }
+    headers: { origin }
   });
   assert.equal(response.status, 302);
   const authorizationUrl = new URL(response.headers.get("location"));
@@ -162,17 +161,17 @@ async function completeCallback(baseUrl, state, code = "github-code") {
   return fetch(callback);
 }
 
-async function exchange(baseUrl, payload) {
+async function exchange(baseUrl, payload, origin = ADMIN_ORIGIN) {
   return fetch(`${baseUrl}/api/auth/exchange`, {
     method: "POST",
     headers: {
-      origin: ADMIN_ORIGIN,
+      origin,
       "content-type": "application/json"
     },
     body: JSON.stringify({
       code: payload.code,
       nonce: payload.nonce,
-      origin: ADMIN_ORIGIN
+      origin
     })
   });
 }
@@ -180,10 +179,8 @@ async function exchange(baseUrl, payload) {
 test("production configuration fails closed and development refuses a public host", () => {
   const required = [
     "MINICMS_PUBLIC_URL",
-    "MINICMS_ADMIN_ORIGINS",
     "MINICMS_GITHUB_CLIENT_ID",
     "MINICMS_GITHUB_CLIENT_SECRET",
-    "MINICMS_GITHUB_ALLOWED_LOGIN",
     "MINICMS_SESSION_SECRET"
   ];
   for (const name of required) {
@@ -201,31 +198,6 @@ test("production configuration fails closed and development refuses a public hos
         environment: validEnvironment({ MINICMS_PUBLIC_URL: "http://api.example" })
       }),
     /must use HTTPS/
-  );
-  assert.throws(
-    () =>
-      productionConfiguration({
-        environment: validEnvironment({ MINICMS_ADMIN_ORIGINS: "*" })
-      }),
-    /must not contain a wildcard/
-  );
-  assert.throws(
-    () =>
-      productionConfiguration({
-        environment: validEnvironment({
-          MINICMS_ADMIN_ORIGINS: "http://admin.example"
-        })
-      }),
-    /must use HTTPS/
-  );
-  assert.throws(
-    () =>
-      productionConfiguration({
-        environment: validEnvironment({
-          MINICMS_GITHUB_ALLOWED_LOGIN: "signalwer,another-user"
-        })
-      }),
-    /exactly one valid GitHub login/
   );
   assert.throws(
     () =>
@@ -312,7 +284,7 @@ test("anonymous production requests cannot read or mutate content", async () => 
   });
 });
 
-test("CORS permits only configured exact origins without credentials", async () => {
+test("production CORS permits every origin without credential cookies", async () => {
   await withProductionServer(async ({ baseUrl }) => {
     const allowed = await fetch(`${baseUrl}/api/health`, {
       headers: { origin: ADMIN_ORIGIN }
@@ -320,7 +292,7 @@ test("CORS permits only configured exact origins without credentials", async () 
     assert.equal(allowed.status, 200);
     assert.equal(
       allowed.headers.get("access-control-allow-origin"),
-      ADMIN_ORIGIN
+      "*"
     );
     assert.equal(allowed.headers.get("access-control-allow-credentials"), null);
 
@@ -338,11 +310,46 @@ test("CORS permits only configured exact origins without credentials", async () 
       "Authorization, Content-Type"
     );
 
-    const denied = await fetch(`${baseUrl}/api/health`, {
-      headers: { origin: "https://attacker.example" }
+    const secondOrigin = await fetch(`${baseUrl}/api/health`, {
+      headers: { origin: SECOND_ADMIN_ORIGIN }
     });
-    assert.equal(denied.status, 403);
-    assert.equal(denied.headers.get("access-control-allow-origin"), null);
+    assert.equal(secondOrigin.status, 200);
+    assert.equal(
+      secondOrigin.headers.get("access-control-allow-origin"),
+      "*"
+    );
+  });
+});
+
+test("OAuth accepts every valid browser origin and rejects malformed targets", async () => {
+  await withProductionServer(async ({ baseUrl }) => {
+    const authorizationUrl = await beginAuthentication(
+      baseUrl,
+      "second_origin_nonce_123456",
+      SECOND_ADMIN_ORIGIN
+    );
+    const callback = await completeCallback(
+      baseUrl,
+      authorizationUrl.searchParams.get("state")
+    );
+    assert.equal(callback.status, 200);
+    const callbackSource = await callback.text();
+    assert.match(callbackSource, /https:\/\/another-admin\.example:8443/);
+
+    for (const origin of [
+      "not-an-origin",
+      "https://admin.example/path",
+      "file:///tmp/admin.html"
+    ]) {
+      const start = new URL("/api/auth/github/start", baseUrl);
+      start.searchParams.set("origin", origin);
+      start.searchParams.set("nonce", "invalid_origin_nonce_1234");
+      const response = await fetch(start, {
+        redirect: "manual",
+        headers: { origin: SECOND_ADMIN_ORIGIN }
+      });
+      assert.equal(response.status, 400);
+    }
   });
 });
 
@@ -368,7 +375,7 @@ test("a valid OAuth state reports provider cancellation to its bound opener", as
   });
 });
 
-test("allowed GitHub login gets an origin-bound one-time bearer session", async () => {
+test("signalwerk gets an origin-bound one-time bearer session", async () => {
   await withProductionServer(async ({ baseUrl, github }) => {
     const nonce = "client_nonce_1234567890";
     const authorizationUrl = await beginAuthentication(baseUrl, nonce);
@@ -417,7 +424,7 @@ test("allowed GitHub login gets an origin-bound one-time bearer session", async 
     const exchangeResult = await exchanged.json();
     assert.ok(exchangeResult.token);
     assert.notEqual(exchangeResult.token, GITHUB_ACCESS_TOKEN);
-    assert.equal(exchangeResult.session.login, "SignalWer");
+    assert.equal(exchangeResult.session.login, "SignalWerk");
     assert.equal(exchangeResult.session.authenticationRequired, true);
     assert.doesNotMatch(JSON.stringify(exchangeResult), new RegExp(GITHUB_ACCESS_TOKEN));
 
@@ -429,7 +436,7 @@ test("allowed GitHub login gets an origin-bound one-time bearer session", async 
       headers: authorization
     });
     assert.equal(session.status, 200);
-    assert.equal((await session.json()).login, "SignalWer");
+    assert.equal((await session.json()).login, "SignalWerk");
     const config = await fetch(`${baseUrl}/api/config`, { headers: authorization });
     assert.equal(config.status, 200);
     assert.equal(config.headers.get("cache-control"), "private, no-store");

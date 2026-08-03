@@ -175,10 +175,8 @@ every security setting is valid:
 
 ```sh
 MINICMS_PUBLIC_URL=https://cms-api.example.com \
-MINICMS_ADMIN_ORIGINS=https://www.example.com \
 MINICMS_GITHUB_CLIENT_ID=replace-me \
 MINICMS_GITHUB_CLIENT_SECRET=replace-me \
-MINICMS_GITHUB_ALLOWED_LOGIN=signalwer \
 MINICMS_SESSION_SECRET=replace-with-at-least-32-random-characters \
 HOST=0.0.0.0 \
 npm start -- --project-root /srv/content-project
@@ -191,11 +189,10 @@ and an ephemeral deployment filesystem will lose them.
 ### Docker Compose and Coolify
 
 The repository includes a production image and a Coolify-compatible
-`docker-compose.yml`. Configure these secrets and origins in Coolify:
+`docker-compose.yml`. Configure these secrets in Coolify:
 
 ```text
 MINICMS_PUBLIC_URL=https://cms-api.example.com
-MINICMS_ADMIN_ORIGINS=https://www.example.com
 MINICMS_GITHUB_CLIENT_ID=replace-me
 MINICMS_GITHUB_CLIENT_SECRET=replace-me
 MINICMS_SESSION_SECRET=replace-with-at-least-32-random-characters
@@ -226,10 +223,8 @@ the final resource boundary.
 
 - `MINICMS_PUBLIC_URL` is the service's exact HTTPS origin, without a path or
   trailing slash.
-- `MINICMS_ADMIN_ORIGINS` is one or more exact comma-separated HTTPS origins.
-  Paths and wildcards are rejected.
-- `MINICMS_GITHUB_ALLOWED_LOGIN` accepts exactly one GitHub login. This
-  project's production value is `signalwer`; comparison is case-insensitive.
+- The only accepted GitHub login is hard-coded as `signalwerk`; it cannot be
+  widened through an environment variable or project configuration.
 - `MINICMS_SESSION_SECRET` must contain at least 32 characters and should be a
   high-entropy deployment secret.
 
@@ -239,19 +234,21 @@ GitHub scopes; the authenticated `/user` identity is sufficient.
 
 The service uses GitHub's authorization-code flow with server-held OAuth
 state and PKCE S256. It exchanges the code and loads `/user` server-side, then
-allows only the configured login. A GitHub access token is never returned to
+allows only `signalwerk`. A GitHub access token is never returned to
 the browser. The callback sends an origin- and nonce-bound, one-time exchange
 code to the opener. That code lasts 60 seconds and can be exchanged once for a
 random opaque bearer session lasting eight hours. Only keyed hashes of OAuth
 state, exchange codes, and bearer tokens are kept in memory. Restarting the
 service logs out existing sessions.
 
-Production CORS reflects only a configured exact admin origin, permits only
-`Authorization` and `Content-Type`, and never enables credential cookies or a
-wildcard. All content API reads and writes require a bearer before large body
-parsers run. `/api/health`, `/api/ready`, and the authentication bootstrap
-routes are public. Health reports that the process is alive; readiness also
-validates the project and image configuration.
+Production CORS allows every origin with `Access-Control-Allow-Origin: *`,
+permits the `Authorization` and `Content-Type` headers, and never enables
+credential cookies. OAuth accepts any canonical HTTP(S) browser origin, but
+the callback and one-time exchange remain bound to that exact requesting
+origin and nonce. All content API reads and writes require a bearer before
+large body parsers run. `/api/health`, `/api/ready`, and the authentication
+bootstrap routes are public. Health reports that the process is alive;
+readiness also validates the project and image configuration.
 The `/media/*` routes are intentionally public: these assets are website-public content,
 and ordinary image elements cannot attach an OAuth bearer header.
 
