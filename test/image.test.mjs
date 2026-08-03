@@ -12,7 +12,10 @@ const SVG_SOURCE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80"
 const PADDED_SVG_SOURCE = `<!--${" ".repeat(70 * 1024)}-->${SVG_SOURCE}`;
 
 function configSource({ publicFolder = "/media", schema = "images_v1" } = {}) {
-  return `site:
+  return `connectors:
+  default:
+    name: api
+site:
   media_folder: content/uploads
   public_folder: ${publicFolder}
   image_processing:

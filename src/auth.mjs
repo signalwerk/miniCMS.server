@@ -1,7 +1,8 @@
 import {
   createHash,
   createHmac,
-  randomBytes as cryptographicRandomBytes
+  randomBytes as cryptographicRandomBytes,
+  timingSafeEqual
 } from "node:crypto";
 import express from "express";
 
@@ -171,7 +172,8 @@ function createProductionAuthentication(
     publicUrl,
     githubClientId,
     githubClientSecret,
-    sessionSecret
+    sessionSecret,
+    readToken = ""
   },
   {
     fetchImpl = fetch,
@@ -192,6 +194,37 @@ function createProductionAuthentication(
     return createHmac("sha256", sessionSecret)
       .update(`${kind}:${value}`)
       .digest("base64url");
+  }
+
+  function privateDigest(kind, value) {
+    return createHmac("sha256", sessionSecret)
+      .update(`${kind}:${value}`)
+      .digest();
+  }
+
+  const readTokenDigest = readToken
+    ? privateDigest("read-token", readToken)
+    : null;
+
+  function matchesReadToken(value) {
+    return Boolean(
+      readTokenDigest &&
+        timingSafeEqual(
+          privateDigest("read-token", value),
+          readTokenDigest
+        )
+    );
+  }
+
+  function permitsMachineRead(request) {
+    if (!["GET", "HEAD"].includes(request.method)) return false;
+    const segments = request.path.split("/").filter(Boolean);
+    return (
+      (segments.length === 1 && segments[0] === "config") ||
+      (segments[0] === "collections" &&
+        segments.length >= 1 &&
+        segments.length <= 3)
+    );
   }
 
   function pruneExpired() {
@@ -229,7 +262,7 @@ function createProductionAuthentication(
     const authorization = request.get("authorization");
     if (!authorization) return null;
     const match = /^Bearer ([^\s]+)$/.exec(authorization);
-    if (!match || !BEARER_PATTERN.test(match[1])) {
+    if (!match) {
       throw httpError(401, "The miniCMS API session is invalid.");
     }
     return match[1];
@@ -242,6 +275,9 @@ function createProductionAuthentication(
       if (required) throw httpError(401, "Authentication is required.");
       return null;
     }
+    if (!BEARER_PATTERN.test(bearer)) {
+      throw httpError(401, "The miniCMS API session is invalid.");
+    }
     const hash = privateHash("session", bearer);
     const session = sessions.get(hash);
     if (!session) {
@@ -253,6 +289,15 @@ function createProductionAuthentication(
   function requireSession(request, response, next) {
     response.set("cache-control", "private, no-store");
     try {
+      const bearer = bearerFromRequest(request);
+      if (bearer && matchesReadToken(bearer)) {
+        if (!permitsMachineRead(request)) {
+          throw httpError(403, "The miniCMS API read token cannot modify content.");
+        }
+        request.miniCmsMachineRead = true;
+        next();
+        return;
+      }
       const authenticated = sessionForRequest(request);
       request.miniCmsSession = authenticated.session;
       request.miniCmsSessionHash = authenticated.hash;

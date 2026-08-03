@@ -16,6 +16,26 @@ function requiredEnvironmentValue(environment, name) {
   return value.trim();
 }
 
+function optionalReadToken(environment) {
+  const configured = environment.MINICMS_READ_TOKEN;
+  if (configured === undefined || configured === null || configured === "") {
+    return "";
+  }
+  if (typeof configured !== "string") {
+    throw configurationError("MINICMS_READ_TOKEN must be a string.");
+  }
+  const token = configured.trim();
+  if (token.length < 32) {
+    throw configurationError(
+      "MINICMS_READ_TOKEN must contain at least 32 characters when configured."
+    );
+  }
+  if (/\s/.test(token)) {
+    throw configurationError("MINICMS_READ_TOKEN must not contain whitespace.");
+  }
+  return token;
+}
+
 function parsePort(value = "8787") {
   const port = Number(value);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -109,7 +129,8 @@ function productionConfiguration({
     publicUrl,
     githubClientId,
     githubClientSecret,
-    sessionSecret
+    sessionSecret,
+    readToken: optionalReadToken(environment)
   });
 }
 

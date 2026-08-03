@@ -14,8 +14,8 @@ same change unless backward compatibility is explicitly requested.
 - `src/app.mjs` owns the existing config, complete-record YAML, collection,
   upload, rename, delete, and public-media HTTP behavior.
 - `src/auth.mjs` owns wildcard production CORS, GitHub OAuth with PKCE,
-  one-time origin-bound code exchange, in-memory bearer sessions, and
-  authorization middleware.
+  one-time origin-bound code exchange, in-memory bearer sessions, the optional
+  fixed machine-read bearer, and authorization middleware.
 - `src/config.mjs` is the fail-closed environment and command configuration
   boundary.
 - `src/image/` owns the public Sharp derivative service: `config.mjs` reads
@@ -28,8 +28,10 @@ same change unless backward compatibility is explicitly requested.
 - `bin/minicms-api.mjs` starts either the loopback-only unauthenticated `dev`
   service or the always-authenticated production `start` service.
 - Content-model behavior must remain DRY. Import it only through
-  `@signalwerk/minicms/core/content`, `/core/media`, `/core/slug`, and
-  `/core/image-service`.
+  `@signalwerk/minicms/core/content`, `/core/connectors`, `/core/media`,
+  `/core/slug`, and `/core/image-service`. Service configuration is a source
+  manifest and must use `validateSourceConfig`; it never materializes or
+  proxies remote aliases.
 - This standalone repository pins `@signalwerk/minicms` to an immutable public
   GitHub archive. Publish the required miniCMS commit before updating that pin,
   and regenerate `package-lock.json`; do not restore a sibling `file:`
@@ -54,6 +56,11 @@ same change unless backward compatibility is explicitly requested.
   validated admin origin and client nonce, expire after 60 seconds, and are
   single-use. Bearers expire after eight hours and logout revokes them.
 - Store only keyed hashes of state, exchange codes, and bearer tokens.
+- `MINICMS_READ_TOKEN` is an optional production-only machine credential with
+  at least 32 non-whitespace characters. Compare only keyed fixed-length
+  digests. It authorizes exactly GET/HEAD config, collection-list, and record
+  routes; it never authorizes config writes, record mutations, renames, or
+  uploads and never changes the GitHub identity gate for browser sessions.
 - All non-auth `/api/*` routes authenticate before large parsers. Keep the raw
   `/media/<collection>/<sha256>/<filename>` route and canonical derivative
   `/<schema>/media/<collection>/<sha256>/<canonical-operations>/<output-name>.<format>`
@@ -110,6 +117,10 @@ same change unless backward compatibility is explicitly requested.
   routes under `/api` remain authenticated by HTTP method and route shape.
 - Production project roots must use durable writable storage. The service does
   not synchronize filesystem edits back to GitHub.
+- Each service owns exactly one project root and never proxies connector
+  traffic. Collections containing both `connector` and `remote_collection`
+  are imported client-side aliases: omit them from the local collection index,
+  reject their CRUD/upload routes, and skip them during local folder checks.
 - The service is single-replica per writable project root: OAuth state,
   sessions, write coordination, and image work are process-local. A CDN or
   reverse proxy owns public-route request rate limiting.
@@ -126,11 +137,13 @@ same change unless backward compatibility is explicitly requested.
   `delete_files_with_record`. On first upload, remove only strictly named stale
   upload temporaries left by an interrupted prior single-replica process.
 - Production API CORS deliberately uses `Access-Control-Allow-Origin: *` and
-  never credential cookies; every content operation still requires an opaque
-  bearer issued only after `signalwerk` authenticates. OAuth start accepts any
-  canonical HTTP(S) browser origin, while callback delivery and one-time code
-  exchange remain bound to that exact origin and client nonce. Authentication
-  responses retain no-store, nosniff, CSP, and no-referrer protections.
+  never credential cookies. Every mutation and ordinary browser content read
+  requires an opaque bearer issued only after `signalwerk` authenticates; the
+  separately configured machine token grants only the narrow read routes above.
+  OAuth start accepts any canonical HTTP(S) browser origin, while callback
+  delivery and one-time code exchange remain bound to that exact origin and
+  client nonce. Authentication responses retain no-store, nosniff, CSP, and
+  no-referrer protections.
 - Unauthenticated development accepts browser API requests only from loopback
   origins; origin-less CLI requests remain valid.
 

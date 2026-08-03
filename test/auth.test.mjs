@@ -20,6 +20,7 @@ const ADMIN_ORIGIN = "https://admin.example";
 const SECOND_ADMIN_ORIGIN = "https://another-admin.example:8443";
 const PUBLIC_URL = "https://api.example";
 const GITHUB_ACCESS_TOKEN = "github-access-token-that-must-stay-server-side";
+const READ_TOKEN = "machine-read-token-with-at-least-32-characters";
 
 function validEnvironment(overrides = {}) {
   return {
@@ -38,7 +39,10 @@ async function makeFixture() {
   await fs.mkdir(path.join(rootDir, "content", "pages"), { recursive: true });
   await fs.writeFile(
     path.join(rootDir, "cms.config.yml"),
-    `site:
+    `connectors:
+  default:
+    name: api
+site:
   media_folder: content/media
   public_folder: /media
 node_types:
@@ -49,6 +53,11 @@ node_types:
 collections:
   pages:
     folder: content/pages
+    extension: yml
+    node_type: page
+    allowed_types: [page]
+  empty:
+    folder: content/empty
     extension: yml
     node_type: page
     allowed_types: [page]
@@ -102,12 +111,16 @@ function githubFetch({ login = "SignalWerk" } = {}) {
 
 async function withProductionServer(
   run,
-  { login = "SignalWerk", clock = { value: Date.parse("2026-08-02T12:00:00Z") } } = {}
+  {
+    login = "SignalWerk",
+    clock = { value: Date.parse("2026-08-02T12:00:00Z") },
+    environment = {}
+  } = {}
 ) {
   const rootDir = await makeFixture();
   const github = githubFetch({ login });
   const configuration = productionConfiguration({
-    environment: validEnvironment(),
+    environment: validEnvironment(environment),
     projectRoot: rootDir
   });
   const authentication = createProductionAuthentication(configuration, {
@@ -206,9 +219,42 @@ test("production configuration fails closed and development refuses a public hos
       }),
     /at least 32 characters/
   );
+  assert.equal(
+    productionConfiguration({ environment: validEnvironment() }).readToken,
+    ""
+  );
+  assert.equal(
+    productionConfiguration({
+      environment: validEnvironment({ MINICMS_READ_TOKEN: READ_TOKEN })
+    }).readToken,
+    READ_TOKEN
+  );
+  assert.throws(
+    () =>
+      productionConfiguration({
+        environment: validEnvironment({ MINICMS_READ_TOKEN: "too-short" })
+      }),
+    /MINICMS_READ_TOKEN.*at least 32 characters/
+  );
+  assert.throws(
+    () =>
+      productionConfiguration({
+        environment: validEnvironment({
+          MINICMS_READ_TOKEN:
+            "machine-read-token-with-internal whitespace-characters"
+        })
+      }),
+    /MINICMS_READ_TOKEN.*whitespace/
+  );
   assert.throws(
     () => developmentConfiguration({ environment: { HOST: "0.0.0.0" } }),
     /loopback/
+  );
+  assert.equal(
+    developmentConfiguration({
+      environment: { MINICMS_READ_TOKEN: READ_TOKEN }
+    }).readToken,
+    undefined
   );
 });
 
@@ -282,6 +328,96 @@ test("anonymous production requests cannot read or mutate content", async () => 
       sourceBefore
     );
   });
+});
+
+test("the production machine token can only read config and records", async () => {
+  await withProductionServer(
+    async ({ baseUrl, rootDir }) => {
+      const authorization = {
+        authorization: `Bearer ${READ_TOKEN}`
+      };
+      const readablePaths = [
+        "/api/config",
+        "/api/collections",
+        "/api/collections/pages",
+        "/api/collections/empty",
+        "/api/collections/pages/home"
+      ];
+      for (const pathname of readablePaths) {
+        const response = await fetch(`${baseUrl}${pathname}`, {
+          headers: authorization
+        });
+        assert.equal(response.status, 200, pathname);
+        assert.equal(response.headers.get("cache-control"), "private, no-store");
+      }
+      await assert.rejects(
+        fs.access(path.join(rootDir, "content", "empty")),
+        (error) => error.code === "ENOENT"
+      );
+
+      const head = await fetch(`${baseUrl}/api/collections/pages/home`, {
+        method: "HEAD",
+        headers: authorization
+      });
+      assert.equal(head.status, 200);
+      assert.equal(await head.text(), "");
+
+      const configBefore = await fs.readFile(
+        path.join(rootDir, "cms.config.yml"),
+        "utf8"
+      );
+      const forbiddenRequests = [
+        ["POST", "/api/auth/logout"],
+        ["PUT", "/api/config"],
+        ["POST", "/api/collections/pages"],
+        ["PUT", "/api/collections/pages/home"],
+        ["DELETE", "/api/collections/pages/home"],
+        ["POST", "/api/collections/pages/home/rename"],
+        ["POST", "/api/media/pages?filename=blocked.png"]
+      ];
+      for (const [method, pathname] of forbiddenRequests) {
+        const response = await fetch(`${baseUrl}${pathname}`, {
+          method,
+          headers: {
+            ...authorization,
+            "content-type": "application/json"
+          },
+          body: method === "DELETE" ? undefined : "{}"
+        });
+        assert.equal(response.status, 403, `${method} ${pathname}`);
+      }
+      assert.equal(
+        await fs.readFile(path.join(rootDir, "cms.config.yml"), "utf8"),
+        configBefore
+      );
+
+      assert.equal(
+        (
+          await fetch(`${baseUrl}/api/config`, {
+            headers: { authorization: `Bearer ${READ_TOKEN}-wrong` }
+          })
+        ).status,
+        401
+      );
+      assert.equal(
+        (
+          await fetch(`${baseUrl}/api/auth/session`, {
+            headers: authorization
+          })
+        ).status,
+        401
+      );
+      assert.equal(
+        (
+          await fetch(`${baseUrl}/api/collections/pages/home/rename`, {
+            headers: authorization
+          })
+        ).status,
+        403
+      );
+    },
+    { environment: { MINICMS_READ_TOKEN: READ_TOKEN } }
+  );
 });
 
 test("production CORS permits every origin without credential cookies", async () => {

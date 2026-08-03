@@ -13,9 +13,12 @@ import {
   hierarchyValue,
   parseYaml,
   summarizeRecord,
-  validateConfig as validateSharedConfig,
   validateRecord as validateSharedRecord
 } from "@signalwerk/minicms/core/content";
+import {
+  isRemoteCollection,
+  validateSourceConfig as validateSharedConfig
+} from "@signalwerk/minicms/core/connectors";
 import { createDevelopmentAuthentication } from "./auth.mjs";
 import {
   createImageService,
@@ -215,6 +218,12 @@ export function createApp({
     if (!configuredCollection) {
       throw httpError(404, `Collection "${name}" does not exist.`);
     }
+    if (isRemoteCollection(configuredCollection)) {
+      throw httpError(
+        404,
+        `Collection "${name}" is provided by connector "${configuredCollection.connector}" and is not stored by this service.`
+      );
+    }
     const collection = { name, ...configuredCollection };
 
     const folder = path.resolve(rootDir, collection.folder);
@@ -356,6 +365,7 @@ export function createApp({
         throw httpError(400, "site.media_folder must be inside content/.");
       }
       for (const [name, collection] of Object.entries(config.collections)) {
+        if (isRemoteCollection(collection)) continue;
         if (typeof collection.folder !== "string" || !collection.folder) {
           throw httpError(400, `Collection "${name}" must define a folder.`);
         }
@@ -392,35 +402,37 @@ export function createApp({
       const config = await getConfig();
       response.json({
         collections: Object.fromEntries(
-          Object.entries(config.collections).map(
-            ([
-              name,
-              {
-                label,
-                label_singular,
-                icon,
-                node_type,
-                hierarchy,
-                views,
-                slug,
-                identifier_field,
-                delete_files_with_record
-              }
-            ]) => [
-              name,
-              {
-                label,
-                label_singular,
-                icon,
-                node_type,
-                hierarchy,
-                views,
-                slug,
-                identifier_field,
-                delete_files_with_record
-              }
-            ]
-          )
+          Object.entries(config.collections)
+            .filter(([, collection]) => !isRemoteCollection(collection))
+            .map(
+              ([
+                name,
+                {
+                  label,
+                  label_singular,
+                  icon,
+                  node_type,
+                  hierarchy,
+                  views,
+                  slug,
+                  identifier_field,
+                  delete_files_with_record
+                }
+              ]) => [
+                name,
+                {
+                  label,
+                  label_singular,
+                  icon,
+                  node_type,
+                  hierarchy,
+                  views,
+                  slug,
+                  identifier_field,
+                  delete_files_with_record
+                }
+              ]
+            )
         )
       });
     } catch (error) {
@@ -431,8 +443,13 @@ export function createApp({
   app.get("/api/collections/:collectionName", async (request, response, next) => {
     try {
       const { collection, folder } = await getCollection(request.params.collectionName);
-      await fs.mkdir(folder, { recursive: true });
-      const entries = await fs.readdir(folder, { withFileTypes: true });
+      let entries;
+      try {
+        entries = await fs.readdir(folder, { withFileTypes: true });
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+        entries = [];
+      }
       const extensions = new Set([".yml", ".yaml"]);
       const files = entries.filter(
         (entry) => entry.isFile() && extensions.has(path.extname(entry.name).toLowerCase())

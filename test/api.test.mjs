@@ -17,7 +17,10 @@ async function makeFixture() {
   await fs.mkdir(path.join(rootDir, "content", "files"), { recursive: true });
   await fs.writeFile(
     path.join(rootDir, "cms.config.yml"),
-    `site:
+    `connectors:
+  default:
+    name: api
+site:
   media_folder: content/media
   public_folder: /media
 node_types:
@@ -198,6 +201,92 @@ test("validates and atomically saves the guided configuration", async () => {
     );
     assert.equal(current.site.name, "Edited project");
     assert.equal(current.node_types.page.fields.layout.widget, "select");
+  });
+});
+
+test("stores remote aliases without treating them as local collections", async () => {
+  await withServer(async (baseUrl, rootDir) => {
+    const config = await fetch(`${baseUrl}/api/config`).then((response) =>
+      response.json()
+    );
+    config.connectors.central_media = {
+      name: "api",
+      api_url: "https://media.example"
+    };
+    config.node_types.central_image = {
+      connector: "central_media",
+      remote_type: "media_image"
+    };
+    config.collections.central_images = {
+      connector: "central_media",
+      remote_collection: "images"
+    };
+
+    const saved = await fetch(`${baseUrl}/api/config`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(config)
+    });
+    assert.equal(saved.status, 200);
+    const savedConfig = (await saved.json()).config;
+    assert.deepEqual(savedConfig.collections.central_images, {
+      connector: "central_media",
+      remote_collection: "images"
+    });
+    assert.deepEqual(savedConfig.node_types.central_image, {
+      connector: "central_media",
+      remote_type: "media_image"
+    });
+
+    const source = await fs.readFile(
+      path.join(rootDir, "cms.config.yml"),
+      "utf8"
+    );
+    assert.match(source, /central_images:/);
+    assert.match(source, /remote_collection: images/);
+
+    const collectionIndex = await fetch(`${baseUrl}/api/collections`).then(
+      (response) => response.json()
+    );
+    assert.equal(collectionIndex.collections.central_images, undefined);
+
+    const requests = [
+      ["GET", "/api/collections/central_images"],
+      ["GET", "/api/collections/central_images/example"],
+      ["POST", "/api/collections/central_images"],
+      ["PUT", "/api/collections/central_images/example"],
+      ["DELETE", "/api/collections/central_images/example"],
+      ["POST", "/api/collections/central_images/example/rename"],
+      ["POST", "/api/media/central_images?filename=example.png"]
+    ];
+    for (const [method, pathname] of requests) {
+      const response = await fetch(`${baseUrl}${pathname}`, {
+        method,
+        headers: {
+          "content-type":
+            pathname.startsWith("/api/media/")
+              ? "image/png"
+              : "application/json"
+        },
+        body: ["GET", "DELETE"].includes(method) ? undefined : "{}"
+      });
+      assert.equal(response.status, 404, `${method} ${pathname}`);
+      assert.match(
+        (await response.json()).message,
+        /provided by connector "central_media".*not stored by this service/
+      );
+    }
+
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "central_images")),
+      (error) => error.code === "ENOENT"
+    );
+    await assert.rejects(
+      fs.access(
+        path.join(rootDir, "content", "media", "central_images")
+      ),
+      (error) => error.code === "ENOENT"
+    );
   });
 });
 

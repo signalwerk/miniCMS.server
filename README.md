@@ -3,8 +3,8 @@
 The independent filesystem microservice for
 [`miniCMS`](https://github.com/signalwerk/miniCMS). It exposes the same content operations used
 by the browser's miniCMS API adapter without serving or building the editor.
-The editor remains a static JavaScript application and may choose either the
-miniCMS API or GitHub API backend.
+The editor remains a static JavaScript application and may use miniCMS API and
+GitHub connectors side by side.
 
 The service reads a consumer project's `cms.config.yml`, complete YAML records
 below `content/`, and uploaded files below the configured media folder. Shared
@@ -208,6 +208,7 @@ The repository includes a production image and a Coolify-compatible
 MINICMS_GITHUB_CLIENT_ID=replace-me
 MINICMS_GITHUB_CLIENT_SECRET=replace-me
 MINICMS_SESSION_SECRET=replace-with-at-least-32-random-characters
+MINICMS_READ_TOKEN=optional-read-only-deployment-token
 ```
 
 Then deploy the Compose service and assign its domain to container port `8787`.
@@ -242,6 +243,11 @@ Sharp concurrency and queue limits remain the final resource boundary.
   widened through an environment variable or project configuration.
 - `MINICMS_SESSION_SECRET` must contain at least 32 characters and should be a
   high-entropy deployment secret.
+- `MINICMS_READ_TOKEN` is optional. When configured, it must contain at least
+  32 non-whitespace characters and should be an independent high-entropy
+  deployment secret. Send it as an `Authorization: Bearer` value only from a
+  trusted static-build environment; never store it in `cms.config.yml` or
+  browser code.
 
 Configure the GitHub OAuth application's callback URL as
 `<MINICMS_PUBLIC_URL>/api/auth/github/callback`. The flow requests no optional
@@ -260,10 +266,13 @@ Production CORS allows every origin with `Access-Control-Allow-Origin: *`,
 permits the `Authorization` and `Content-Type` headers, and never enables
 credential cookies. OAuth accepts any canonical HTTP(S) browser origin, but
 the callback and one-time exchange remain bound to that exact requesting
-origin and nonce. All content API reads and writes require a bearer before
-large body parsers run. `/api/health`, `/api/ready`, and the authentication
-bootstrap routes are public. Health reports that the process is alive;
-readiness also validates the project and image configuration.
+origin and nonce. Browser content reads and every mutation require an opaque
+GitHub-authenticated bearer before large body parsers run. An optional machine
+read token can access only `GET`/`HEAD` config, collection-list, and record
+routes; the same token receives `403` for configuration writes, record
+mutations, renames, and uploads. `/api/health`, `/api/ready`, and the
+authentication bootstrap routes are public. Health reports that the process
+is alive; readiness also validates the project and image configuration.
 The raw `/media/*` and derivative `/<schema>/media/*` routes are intentionally
 public: these assets are website-public content, and ordinary image elements
 cannot attach an OAuth bearer header.
@@ -291,6 +300,19 @@ Authenticated production routes:
 - `GET`, `PUT`, and `DELETE /api/collections/:collection/:record`
 - `POST /api/collections/:collection/:record/rename`
 - `POST /api/media/:collection?filename=<name>`
+
+When `MINICMS_READ_TOKEN` is configured, that bearer additionally permits only:
+
+- `GET` and `HEAD /api/config`
+- `GET` and `HEAD /api/collections`
+- `GET` and `HEAD /api/collections/:collection`
+- `GET` and `HEAD /api/collections/:collection/:record`
+
+The service still owns exactly one project root. Imported collection aliases
+declared with `connector` and `remote_collection` are config metadata for
+clients: this service neither proxies them nor maps them into its filesystem.
+Their collection CRUD and upload routes return `404`; clients must call the
+named connector directly.
 
 Run all filesystem and authentication integration tests with:
 
