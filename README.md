@@ -161,7 +161,7 @@ content:
 - `MINICMS_IMAGE_MAX_OUTPUT_PIXELS` (default 32,000,000)
 - `MINICMS_IMAGE_MAX_OUTPUT_BYTES` (default 64 MiB)
 - `MINICMS_IMAGE_MAX_EDGE` (default 8192px)
-- `MINICMS_IMAGE_TIMEOUT_SECONDS` (default 20)
+- `MINICMS_IMAGE_TIMEOUT_SECONDS` (default 40)
 - `MINICMS_MEDIA_MAX_UPLOAD_BYTES` (default 512 MiB)
 
 Uploads remain authenticated. They are streamed into an exclusive temporary

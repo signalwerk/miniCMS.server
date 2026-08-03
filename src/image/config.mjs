@@ -109,7 +109,7 @@ function operationalImageConfiguration({
     }),
     timeoutSeconds: integer(
       environment.MINICMS_IMAGE_TIMEOUT_SECONDS,
-      20,
+      40,
       {
         name: "MINICMS_IMAGE_TIMEOUT_SECONDS",
         minimum: 1,
