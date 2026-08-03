@@ -11,11 +11,7 @@ import { createApp } from "../src/app.mjs";
 const SVG_SOURCE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80"><script>alert(1)</script><rect width="120" height="80" fill="red"/></svg>`;
 const PADDED_SVG_SOURCE = `<!--${" ".repeat(70 * 1024)}-->${SVG_SOURCE}`;
 
-function configSource({
-  strategy = "revalidate",
-  maxAge = 0,
-  publicFolder = "/media"
-} = {}) {
+function configSource({ publicFolder = "/media", schema = "images_v1" } = {}) {
   return `site:
   media_folder: content/uploads
   public_folder: ${publicFolder}
@@ -26,9 +22,7 @@ function configSource({
     format: webp
     quality: 82
     cache:
-      schema: images_v1
-      strategy: ${strategy}
-      max_age: ${maxAge}
+      schema: ${schema}
 node_types:
   page:
     kind: document
@@ -278,16 +272,6 @@ async function cacheFiles(cacheDir) {
   return files;
 }
 
-async function waitFor(check, timeout = 3000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const result = await check();
-    if (result) return result;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  return check();
-}
-
 test("transforms content-addressed raster images, publishes safe info, and reuses the atomic disk cache", async () => {
   await withServer(async ({
     baseUrl,
@@ -305,12 +289,15 @@ test("transforms content-addressed raster images, publishes safe info, and reuse
     });
     assert.equal(
       route,
-      `/media/_image/images_v1/images/${addressedSha}/photo.jpg/resize@width:60,height:40,fit:inside;quality@70/photo.webp`
+      `/images_v1/media/images/${addressedSha}/resize@width:60,height:40,fit:inside;quality@70/photo.webp`
     );
     const first = await fetch(`${baseUrl}${route}`);
     assert.equal(first.status, 200);
     assert.equal(first.headers.get("content-type"), "image/webp");
-    assert.equal(first.headers.get("cache-control"), "public, max-age=0, must-revalidate");
+    assert.equal(
+      first.headers.get("cache-control"),
+      "public, max-age=31536000, immutable"
+    );
     assert.equal(first.headers.get("x-minicms-image-cache"), "miss");
     assert.match(first.headers.get("etag"), /^"sha256-[a-f0-9]{64}"$/);
     const firstBytes = Buffer.from(await first.arrayBuffer());
@@ -337,20 +324,19 @@ test("transforms content-addressed raster images, publishes safe info, and reuse
 
     const files = await cacheFiles(cacheDir);
     assert.equal(files.length, 1);
-    assert.match(path.basename(files[0]), /^[a-f0-9]{64}\.webp$/);
-    assert.match(
+    assert.equal(
       path.relative(cacheDir, files[0]),
-      /^minicms-image-cache\/[a-f0-9]{16}\/images_v1\/[a-f0-9]{2}\/[a-f0-9]{64}\.webp$/
+      `images_v1/media/images/${addressedSha}/` +
+        "resize@width:60,height:40,fit:inside;quality@70/photo.webp"
     );
     assert.equal(files.some((file) => file.endsWith(".tmp")), false);
 
-    const ownedCacheRoot = path.dirname(path.dirname(path.dirname(files[0])));
-    await fs.rm(ownedCacheRoot, { recursive: true });
+    await fs.rm(cacheDir, { recursive: true });
     const rebuilt = await fetch(`${baseUrl}${route}`);
     assert.equal(rebuilt.status, 200);
     assert.equal(rebuilt.headers.get("x-minicms-image-cache"), "miss");
     await rebuilt.arrayBuffer();
-    await fs.access(ownedCacheRoot);
+    await fs.access(cacheDir);
 
     const infoRoute = servicePath(addressedSource, config, { info: true });
     const infoResponse = await fetch(`${baseUrl}${infoRoute}`);
@@ -366,6 +352,7 @@ test("transforms content-addressed raster images, publishes safe info, and reuse
     assert.equal(Object.hasOwn(info, "path"), false);
     assert.equal(Object.hasOwn(info, "exif"), false);
     assert.equal(Object.hasOwn(info, "icc"), false);
+    assert.deepEqual(await cacheFiles(cacheDir), [files[0]]);
 
     const orientedInfoRoute = servicePath(
       media.oriented.source,
@@ -419,7 +406,7 @@ test("uploads directly into the readable content-addressed image route", async (
     });
     assert.match(
       route,
-      new RegExp(`/pages/${sha}/fresh-image\\.png/resize@`)
+      new RegExp(`/pages/${sha}/resize@[^/]+/fresh-image\\.webp$`)
     );
     const transformed = await fetch(`${baseUrl}${route}`);
     assert.equal(transformed.status, 200);
@@ -428,6 +415,27 @@ test("uploads directly into the readable content-addressed image route", async (
     ).metadata();
     assert.equal(metadata.width, 8);
     assert.equal(metadata.height, 4);
+  });
+});
+
+test("resolves distinct readable filenames inside one content hash", async () => {
+  await withServer(async ({ baseUrl, cacheDir, config, media }) => {
+    const alias = "photo-alias.jpg";
+    await fs.copyFile(
+      media.photo.filePath,
+      path.join(path.dirname(media.photo.filePath), alias)
+    );
+    const route = servicePath(
+      `/media/images/${media.photo.sha}/${alias}`,
+      config,
+      { width: 24, height: 24 }
+    );
+    assert.match(route, /\/photo-alias\.webp$/);
+    assert.equal((await fetch(`${baseUrl}${route}`)).status, 200);
+    assert.deepEqual(
+      (await cacheFiles(cacheDir)).map((file) => path.relative(cacheDir, file)),
+      [route.slice(1)]
+    );
   });
 });
 
@@ -717,37 +725,16 @@ test("processes both TIF and TIFF source filenames", async () => {
   });
 });
 
-test("source changes invalidate the server cache without serving deleted media", async () => {
-  await withServer(async ({ baseUrl, config, mediaDir, media }) => {
+test("cached derivatives are not served after their source is deleted", async () => {
+  await withServer(async ({ baseUrl, config, media }) => {
     const route = servicePath(media.photo.source, config, {
       width: 40,
       height: 40,
       format: "png"
     });
     const first = await fetch(`${baseUrl}${route}`);
-    const firstEtag = first.headers.get("etag");
+    assert.equal(first.status, 200);
     await first.arrayBuffer();
-
-    await sharp({
-      create: {
-        width: 80,
-        height: 120,
-        channels: 3,
-        background: { r: 10, g: 20, b: 220 }
-      }
-    })
-      .jpeg()
-      .toFile(path.join(mediaDir, ".replacement.jpg"));
-    await fs.rename(
-      path.join(mediaDir, ".replacement.jpg"),
-      media.photo.filePath
-    );
-
-    const replaced = await fetch(`${baseUrl}${route}`);
-    assert.equal(replaced.status, 200);
-    assert.equal(replaced.headers.get("x-minicms-image-cache"), "miss");
-    assert.notEqual(replaced.headers.get("etag"), firstEtag);
-    await replaced.arrayBuffer();
 
     await fs.unlink(media.photo.filePath);
     const deleted = await fetch(`${baseUrl}${route}`);
@@ -755,7 +742,32 @@ test("source changes invalidate the server cache without serving deleted media",
   });
 });
 
-test("existing URLs survive image defaults and cache schema changes", async () => {
+test("rejects cached and raw bytes when a source no longer matches its hash", async () => {
+  await withServer(async ({ baseUrl, config, media }) => {
+    const route = servicePath(media.photo.source, config, {
+      width: 40,
+      height: 40
+    });
+    const initial = await fetch(`${baseUrl}${route}`);
+    assert.equal(initial.status, 200);
+    await initial.arrayBuffer();
+
+    const replacement = await sharp({
+      create: {
+        width: 120,
+        height: 80,
+        channels: 3,
+        background: { r: 1, g: 2, b: 3 }
+      }
+    }).jpeg().toBuffer();
+    await fs.writeFile(media.photo.filePath, replacement);
+
+    assert.equal((await fetch(`${baseUrl}${route}`)).status, 404);
+    assert.equal((await fetch(`${baseUrl}${media.photo.source}`)).status, 404);
+  });
+});
+
+test("schema changes reject old URLs and publish only the new namespace", async () => {
   await withServer(async ({ baseUrl, config, media }) => {
     const oldRoute = servicePath(media.photo.source, config, {
       width: 60,
@@ -773,19 +785,21 @@ test("existing URLs survive image defaults and cache schema changes", async () =
     assert.equal(saved.status, 200);
     const savedConfig = (await saved.json()).config;
 
-    const oldResponse = await fetch(`${baseUrl}${oldRoute}`);
-    assert.equal(oldResponse.status, 200);
-    assert.match(oldResponse.url, /\/_image\/images_v2\//);
-    const oldOutput = await sharp(
-      Buffer.from(await oldResponse.arrayBuffer())
-    ).metadata();
-    assert.equal(oldOutput.width, 60);
-    assert.equal(oldOutput.height, 40);
+    const oldResponse = await fetch(`${baseUrl}${oldRoute}`, {
+      redirect: "manual"
+    });
+    assert.equal(oldResponse.status, 404);
+    assert.equal(oldResponse.headers.get("location"), null);
 
-    assert.match(
-      servicePath(media.photo.source, savedConfig),
-      /\/_image\/images_v2\/.*resize@width:32,height:32/
-    );
+    const nextRoute = servicePath(media.photo.source, savedConfig);
+    assert.match(nextRoute, /^\/images_v2\/media\/.*resize@width:32,height:32/);
+    const nextResponse = await fetch(`${baseUrl}${nextRoute}`);
+    assert.equal(nextResponse.status, 200);
+    const nextOutput = await sharp(
+      Buffer.from(await nextResponse.arrayBuffer())
+    ).metadata();
+    assert.equal(nextOutput.width, 32);
+    assert.equal(nextOutput.height, 21);
   });
 });
 
@@ -801,7 +815,7 @@ test("canonical transformed URLs survive a custom public media folder", async ()
     });
     assert.match(
       route,
-      new RegExp(`/images/${media.photo.sha}/photo\\.jpg/`)
+      new RegExp(`/images/${media.photo.sha}/resize@`)
     );
     const response = await fetch(`${baseUrl}${route}`);
     assert.equal(response.status, 200);
@@ -819,13 +833,13 @@ test("strictly rejects noncanonical routes, invalid operations, and oversized ou
       width: 40,
       height: 40
     });
-    const oldSchema = valid.replace("/_image/images_v1/", "/_image/old/");
+    const oldSchema = valid.replace("/images_v1/media/", "/old/media/");
     const oldVersion = await fetch(`${baseUrl}${oldSchema}`, {
       redirect: "manual"
     });
-    assert.equal(oldVersion.status, 307);
+    assert.equal(oldVersion.status, 404);
     assert.equal(oldVersion.headers.get("cache-control"), "no-store");
-    assert.equal(oldVersion.headers.get("location"), valid);
+    assert.equal(oldVersion.headers.get("location"), null);
 
     assert.equal(
       (
@@ -833,7 +847,7 @@ test("strictly rejects noncanonical routes, invalid operations, and oversized ou
           `${baseUrl}${valid.replace(addressedSha, addressedSha.toUpperCase())}`
         )
       ).status,
-      400
+      404
     );
     assert.equal(
       (
@@ -849,16 +863,18 @@ test("strictly rejects noncanonical routes, invalid operations, and oversized ou
 
     const sourceRoute = valid.slice(0, valid.indexOf("/resize@"));
     const invalidOperations = `${sourceRoute}/quality@101/photo.webp`;
-    assert.equal((await fetch(`${baseUrl}${invalidOperations}`)).status, 400);
+    assert.equal((await fetch(`${baseUrl}${invalidOperations}`)).status, 404);
 
     const noncanonicalOperations = `${sourceRoute}/resize@40/photo.webp`;
     assert.equal((await fetch(`${baseUrl}${noncanonicalOperations}`)).status, 404);
 
     const invalidFormat = `${sourceRoute}/noop/photo.bmp`;
-    assert.equal((await fetch(`${baseUrl}${invalidFormat}`)).status, 400);
+    assert.equal((await fetch(`${baseUrl}${invalidFormat}`)).status, 404);
 
     const uppercaseFormat = valid.replace(/\.webp$/, ".WEBP");
     assert.equal((await fetch(`${baseUrl}${uppercaseFormat}`)).status, 404);
+
+    assert.equal((await fetch(`${baseUrl}${valid}?download=1`)).status, 404);
 
     const removedEncodedRoute =
       "/media/_image/images_v1/L21lZGlhL3Bob3RvLmpwZw/noop/photo.webp";
@@ -902,7 +918,7 @@ test("strictly rejects noncanonical routes, invalid operations, and oversized ou
 });
 
 test("passes SVG through byte-for-byte, exposes safe dimensions, and never rasterizes it", async () => {
-  await withServer(async ({ baseUrl, config, media, addressedSvgSource }) => {
+  await withServer(async ({ baseUrl, cacheDir, config, media, addressedSvgSource }) => {
     const svgRoute = servicePath(addressedSvgSource, config);
     const response = await fetch(`${baseUrl}${svgRoute}`);
     assert.equal(response.status, 200);
@@ -930,6 +946,7 @@ test("passes SVG through byte-for-byte, exposes safe dimensions, and never raste
     const padded = await fetch(`${baseUrl}${paddedRoute}`);
     assert.equal(padded.status, 200);
     assert.equal(await padded.text(), PADDED_SVG_SOURCE);
+    assert.deepEqual(await cacheFiles(cacheDir), []);
 
     const paddedDisguisedRoute = servicePath(
       media.paddedDisguised.source,
@@ -1018,20 +1035,8 @@ test("serves configured raw media safely and rejects symbolic links", async (t) 
   });
 });
 
-test("disabled cache writes nothing and streamed uploads enforce their byte limit", async () => {
-  await withServer(async ({ baseUrl, config, cacheDir, mediaDir, media }) => {
-    const route = servicePath(media.photo.source, config, {
-      width: 30,
-      height: 20
-    });
-    for (let index = 0; index < 2; index += 1) {
-      const response = await fetch(`${baseUrl}${route}`);
-      assert.equal(response.status, 200);
-      assert.equal(response.headers.get("x-minicms-image-cache"), "disabled");
-      await response.arrayBuffer();
-    }
-    assert.deepEqual(await cacheFiles(cacheDir), []);
-
+test("streamed uploads enforce their byte limit", async () => {
+  await withServer(async ({ baseUrl, mediaDir }) => {
     const jsonBody = JSON.stringify({ ok: true });
     const jsonUpload = await fetch(
       `${baseUrl}/api/media/pages?filename=${encodeURIComponent("data.json")}`,
@@ -1068,7 +1073,7 @@ test("disabled cache writes nothing and streamed uploads enforce their byte limi
       (await fs.readdir(mediaDir)).some((name) => name.startsWith(".minicms-upload-")),
       false
     );
-  }, { strategy: "disabled", maxAge: 0 });
+  });
 });
 
 test("cache storage failures never prevent derivative delivery", async () => {
@@ -1097,9 +1102,7 @@ test("cache storage never follows a linked schema directory", async (t) => {
     assert.equal(initial.status, 200);
     await initial.arrayBuffer();
 
-    const serviceRoot = path.join(cacheDir, "minicms-image-cache");
-    const [projectKey] = await fs.readdir(serviceRoot);
-    const schemaDirectory = path.join(serviceRoot, projectKey, "images_v1");
+    const schemaDirectory = path.join(cacheDir, "images_v1");
     const outsideDirectory = path.join(rootDir, "outside-cache");
     await fs.rm(schemaDirectory, { recursive: true });
     await fs.mkdir(outsideDirectory);
@@ -1126,84 +1129,8 @@ test("cache storage never follows a linked schema directory", async (t) => {
   }, { quietImageWarnings: true });
 });
 
-test("startup maintenance bounds only the service-owned cache", async () => {
-  let sentinel;
-  await withServer(async ({ cacheDir }) => {
-    const files = await waitFor(async () => {
-      const entries = (await cacheFiles(cacheDir)).filter(
-        (file) => file !== sentinel
-      );
-      return entries.length <= 2 ? entries : null;
-    });
-    assert.equal(files.length, 2);
-    assert.equal(await fs.readFile(sentinel, "utf8"), "keep");
-  }, {
-    beforeStart: async ({ rootDir, cacheParent }) => {
-      sentinel = path.join(cacheParent, "unrelated.txt");
-      const projectKey = createHash("sha256")
-        .update(path.resolve(rootDir))
-        .digest("hex")
-        .slice(0, 16);
-      const shard = path.join(
-        cacheParent,
-        "minicms-image-cache",
-        projectKey,
-        "images_v1",
-        "00"
-      );
-      await fs.mkdir(shard, { recursive: true });
-      await fs.writeFile(sentinel, "keep", "utf8");
-      await Promise.all(
-        [1, 2, 3, 4].map((index) =>
-          fs.writeFile(
-            path.join(shard, `${index.toString(16).padStart(64, "0")}.webp`),
-            `cache-${index}`,
-            "utf8"
-          )
-        )
-      );
-    },
-    environment: {
-      MINICMS_IMAGE_CACHE_MAX_ENTRIES: "2"
-    }
-  });
-});
-
-test("opportunistic cache eviction enforces the configured entry bound", async () => {
-  await withServer(async ({ baseUrl, config, cacheDir, media }) => {
-    const responses = await Promise.all(
-      [20, 21, 22, 23].map((width) =>
-        fetch(
-          `${baseUrl}${servicePath(media.photo.source, config, {
-            width,
-            height: 20,
-            format: "webp"
-          })}`
-        )
-      )
-    );
-    await Promise.all(
-      responses.map(async (response) => {
-        assert.equal(response.status, 200);
-        await response.arrayBuffer();
-      })
-    );
-    const files = await waitFor(async () => {
-      const entries = await cacheFiles(cacheDir);
-      return entries.length <= 2 ? entries : null;
-    });
-    assert.equal(files.length, 2);
-    assert.equal(files.every((file) => /^[a-f0-9]{64}\.webp$/.test(path.basename(file))), true);
-  }, {
-    environment: {
-      MINICMS_IMAGE_CACHE_MAX_ENTRIES: "2",
-      MINICMS_IMAGE_CONCURRENCY: "2"
-    }
-  });
-});
-
 test("production authentication still protects mutations while public images remain anonymous", async () => {
-  const fixture = await makeFixture({ strategy: "immutable", maxAge: 123 });
+  const fixture = await makeFixture({ schema: "api" });
   const authentication = {
     cors: (_request, _response, next) => next(),
     router: (_request, _response, next) => next(),
@@ -1231,9 +1158,7 @@ test("production authentication still protects mutations while public images rem
         format: "webp",
         quality: 82,
         cache: {
-          schema: "images_v1",
-          strategy: "immutable",
-          max_age: 123
+          schema: "api"
         }
       }
     }
@@ -1245,7 +1170,7 @@ test("production authentication still protects mutations while public images rem
     assert.equal(publicImage.status, 200);
     assert.equal(
       publicImage.headers.get("cache-control"),
-      "public, max-age=123, immutable"
+      "public, max-age=31536000, immutable"
     );
     await publicImage.arrayBuffer();
 

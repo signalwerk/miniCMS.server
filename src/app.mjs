@@ -254,6 +254,10 @@ export function createApp({
     }
   });
 
+  // Media stays public even when a configured image schema is "api". Mount
+  // its exact GET/HEAD routes before the broader authenticated API namespace.
+  app.use(createMediaRouter({ imageService, getConfig }));
+
   app.use("/api/auth", authentication.router);
   app.use("/api", authentication.requireSession);
 
@@ -663,11 +667,6 @@ export function createApp({
       next(error);
     }
   });
-
-  app.use(
-    "/media",
-    createMediaRouter({ imageService, getConfig })
-  );
 
   app.use((error, _request, response, _next) => {
     const status = error.status || (error instanceof SyntaxError ? 400 : 500);

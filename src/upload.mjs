@@ -57,7 +57,6 @@ function normalizeUploadFilename(value) {
 function normalizeUploadCollection(value) {
   const collection = String(value ?? "");
   if (
-    collection === "_image" ||
     Buffer.byteLength(collection, "utf8") > 255 ||
     !/^[a-z0-9][a-z0-9._-]*$/i.test(collection)
   ) {

@@ -1,6 +1,5 @@
 import os from "node:os";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { normalizeImageProcessingConfig } from "@signalwerk/minicms/core/image-service";
 
 function imageConfigurationError(message, status = 500) {
@@ -23,24 +22,27 @@ function integer(value, fallback, { name, minimum, maximum }) {
   return candidate;
 }
 
-function projectCacheRoot(rootDir, configuredPath) {
-  const configuredParent = configuredPath?.trim();
-  if (configuredParent && !path.isAbsolute(configuredParent)) {
+function imageCacheRoot(rootDir, configuredPath) {
+  const configuredRoot = configuredPath?.trim();
+  if (configuredRoot && !path.isAbsolute(configuredRoot)) {
     throw imageConfigurationError(
-      "MINICMS_IMAGE_CACHE_DIR must be an absolute parent directory."
+      "MINICMS_IMAGE_CACHE_DIR must be an absolute directory."
     );
   }
-  const parent = path.resolve(configuredParent || os.tmpdir());
+  const cacheRoot = path.resolve(
+    configuredRoot || path.join(os.tmpdir(), "minicms-image-cache")
+  );
   if (
-    configuredParent &&
-    (parent === path.parse(parent).root || parent === path.resolve(os.homedir()))
+    configuredRoot &&
+    (cacheRoot === path.parse(cacheRoot).root ||
+      cacheRoot === path.resolve(os.homedir()))
   ) {
     throw imageConfigurationError(
       "MINICMS_IMAGE_CACHE_DIR must not target a filesystem root or home directory."
     );
   }
   const contentRoot = path.resolve(rootDir, "content");
-  const relativeToContent = path.relative(contentRoot, parent);
+  const relativeToContent = path.relative(contentRoot, cacheRoot);
   if (
     relativeToContent === "" ||
     (relativeToContent !== ".." &&
@@ -51,11 +53,7 @@ function projectCacheRoot(rootDir, configuredPath) {
       "MINICMS_IMAGE_CACHE_DIR must not be inside the project content directory."
     );
   }
-  const projectKey = createHash("sha256")
-    .update(path.resolve(rootDir))
-    .digest("hex")
-    .slice(0, 16);
-  return path.join(parent, "minicms-image-cache", projectKey);
+  return cacheRoot;
 }
 
 function operationalImageConfiguration({
@@ -63,34 +61,16 @@ function operationalImageConfiguration({
   environment = process.env
 } = {}) {
   return Object.freeze({
-    cacheRoot: projectCacheRoot(
+    cacheRoot: imageCacheRoot(
       rootDir,
       environment.MINICMS_IMAGE_CACHE_DIR?.trim()
-    ),
-    cacheMaxBytes: integer(
-      environment.MINICMS_IMAGE_CACHE_MAX_BYTES,
-      2 * 1024 * 1024 * 1024,
-      {
-        name: "MINICMS_IMAGE_CACHE_MAX_BYTES",
-        minimum: 1024,
-        maximum: 1024 * 1024 * 1024 * 1024
-      }
-    ),
-    cacheMaxEntries: integer(
-      environment.MINICMS_IMAGE_CACHE_MAX_ENTRIES,
-      10_000,
-      {
-        name: "MINICMS_IMAGE_CACHE_MAX_ENTRIES",
-        minimum: 1,
-        maximum: 1_000_000
-      }
     ),
     concurrency: integer(environment.MINICMS_IMAGE_CONCURRENCY, 2, {
       name: "MINICMS_IMAGE_CONCURRENCY",
       minimum: 1,
       maximum: 32
     }),
-    queueLimit: integer(environment.MINICMS_IMAGE_QUEUE_LIMIT, 32, {
+    queueLimit: integer(environment.MINICMS_IMAGE_QUEUE_LIMIT, 1024, {
       name: "MINICMS_IMAGE_QUEUE_LIMIT",
       minimum: 0,
       maximum: 4096
@@ -159,16 +139,7 @@ function imageProjectConfiguration(config, operational, status = 500) {
   return normalized;
 }
 
-function imageCacheControl({ strategy, max_age: maxAge }) {
-  if (strategy === "disabled") return "no-store";
-  if (strategy === "immutable") {
-    return `public, max-age=${maxAge}, immutable`;
-  }
-  return `public, max-age=${maxAge}, must-revalidate`;
-}
-
 export {
-  imageCacheControl,
   imageProjectConfiguration,
   operationalImageConfiguration
 };

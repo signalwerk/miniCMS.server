@@ -3,6 +3,12 @@
 This package is the independent miniCMS filesystem API. It never builds,
 serves, or imports the React editor.
 
+This service and its current consumers are under coordinated pre-release
+development. Prefer one clean breaking contract across miniCMS, this service,
+and consumer repositories over compatibility routes, redirects, parsers, or
+other shims. Remove the superseded behavior, tests, and documentation in the
+same change unless backward compatibility is explicitly requested.
+
 ## Architecture
 
 - `src/app.mjs` owns the existing config, complete-record YAML, collection,
@@ -48,17 +54,23 @@ serves, or imports the React editor.
   validated admin origin and client nonce, expire after 60 seconds, and are
   single-use. Bearers expire after eight hours and logout revokes them.
 - Store only keyed hashes of state, exchange codes, and bearer tokens.
-- All non-auth `/api/*` routes authenticate before large parsers. Keep
-  the exact content-addressed raw and derivative `/media` routes explicitly
-  public because they contain public website assets and `<img>` requests cannot
-  attach bearer headers.
+- All non-auth `/api/*` routes authenticate before large parsers. Keep the raw
+  `/media/<collection>/<sha256>/<filename>` route and canonical derivative
+  `/<schema>/media/<collection>/<sha256>/<canonical-operations>/<output-name>.<format>`
+  route explicitly public because they contain public website assets and
+  `<img>` requests cannot attach bearer headers.
 - Public content-addressed media paths use exactly
   `<collection>/<lowercase-sha256>/<filename>` below the configured media
-  folder. Resolve real paths, reject every symlink/non-regular file, and never
-  use request values in cache paths. Encoded identifiers and flat raw paths are
-  rejected. SVG is exact passthrough and must never reach Sharp.
-- Sharp always uses finite input/output/channel/timeout bounds and a bounded
-  service queue. Project dimensions are URL-builder defaults; only deployment
+  folder. Resolve real paths and reject every symlink/non-regular file. Only
+  canonical segments returned by the shared route parser may enter mirrored
+  cache paths; never use an unparsed request value. Encoded identifiers and
+  flat raw paths are rejected. Verify source bytes against the route SHA-256
+  before raw, metadata, SVG, cache-hit, or generated delivery; memoization must
+  be bounded and invalidated by the file-stat signature. SVG is exact
+  passthrough and must never reach Sharp.
+- Source hashing and Sharp processing share a bounded service queue. Sharp
+  always uses finite input/output/channel/timeout bounds. Project dimensions
+  are URL-builder defaults; only deployment
   `MINICMS_IMAGE_MAX_*` settings are server-enforced, so existing URLs survive
   later project-default changes. Raster input must match an allowlisted file
   signature before Sharp, which then confirms the detected format. SVG is
@@ -70,22 +82,29 @@ serves, or imports the React editor.
   result dimensions deterministically, pre-extracts the bounding patch, and
   counter-rotates only that patch. A following `inside` resize is fused before
   rotation so huge source crops still produce bounded derivatives.
-- The disk cache uses SHA-256 keys, in-process miss deduplication, atomic
-  publication, streamed hits, best-effort I/O, and finite byte/entry eviction
-  limits. `MINICMS_IMAGE_CACHE_DIR` is a parent; only the fixed project-keyed
-  child is service-owned and eligible for cleanup. Revalidate that ownership
-  on every cache access. Cache schema and shard directories must also be
-  regular, contained directories before use, and one non-creating maintenance
-  pass must be scheduled when the process starts.
-- Raw reusable `/media/:collection/:sha256/:filename` files always revalidate
+- Generated raster cache paths mirror their canonical public URL below the
+  exact service-owned `MINICMS_IMAGE_CACHE_DIR` root:
+  `<schema>/media/<collection>/<sha256>/<canonical-operations>/<output-name>.<format>`.
+  Cache directories must remain regular contained directories. The service
+  uses a SHA-256 digest of that route only for ETags and in-process miss
+  deduplication; publication is atomic, hits are streamed, and cache I/O is
+  best-effort. There is no maintenance, expiry, capacity accounting, or
+  eviction. Metadata JSON and byte-preserving SVG responses are not copied to
+  the raster cache.
+- Raw reusable `/media/<collection>/<sha256>/<filename>` files always revalidate
   and support byte ranges;
   non-image files are attachments on the API/auth origin. Only schema-based
-  derivatives below `/media/_image/*` may use the project's immutable
-  strategy. New URLs use the configured schema; older valid schemas redirect
-  to it during independent rollouts. Curated `.json` metadata uses
+  derivatives below
+  `/<schema>/media/<collection>/<sha256>/<canonical-operations>/<output-name>.<format>`
+  use the service's fixed one-year immutable policy. The requested schema must
+  equal the configured schema; mismatches return 404. There is no legacy
+  `/media/_image/*` route or schema redirect. Curated `.json` metadata uses
   only `noop`, is intentionally public
   with `Access-Control-Allow-Origin: *`, and must never include paths, EXIF/GPS,
   ICC buffers, or internal errors.
+- Mount the exact public GET/HEAD media router before `/api` authentication so
+  every valid configured schema remains usable, including `api`; mutation
+  routes under `/api` remain authenticated by HTTP method and route shape.
 - Production project roots must use durable writable storage. The service does
   not synchronize filesystem edits back to GitHub.
 - The service is single-replica per writable project root: OAuth state,

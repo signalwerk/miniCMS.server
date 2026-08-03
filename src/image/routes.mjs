@@ -5,8 +5,9 @@ import { pipeline } from "node:stream/promises";
 import express from "express";
 import mime from "mime-types";
 import { parseContentAddressedMediaPath } from "@signalwerk/minicms/core/image-service";
-import { imageCacheControl } from "./config.mjs";
 import { parseImageRoute, requestError } from "./url.mjs";
+
+const DERIVATIVE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 
 const CONTENT_TYPES = Object.freeze({
   avif: "image/avif",
@@ -43,10 +44,10 @@ function etagMatches(request, etag) {
     .some((candidate) => candidate.trim() === "*" || normalized(candidate) === normalized(etag));
 }
 
-function publicHeaders(response, { project, etag, length, mtime, svg = false }) {
+function publicHeaders(response, { etag, length, mtime, svg = false }) {
   response.set({
     "accept-ranges": "none",
-    "cache-control": imageCacheControl(project.cache),
+    "cache-control": DERIVATIVE_CACHE_CONTROL,
     "content-length": String(length),
     "cross-origin-resource-policy": "cross-origin",
     etag,
@@ -75,7 +76,6 @@ async function closeResultFile(result) {
 async function sendFileResult(request, response, next, result, contentType) {
   response.type(contentType);
   publicHeaders(response, {
-    project: result.project,
     etag: result.etag,
     length: result.length,
     mtime: result.source.mtime,
@@ -129,18 +129,6 @@ function rawSecurityHeaders(response, result, contentType) {
   }
 }
 
-function imageLocation(route, schema = route.schema) {
-  return [
-    "",
-    "media",
-    "_image",
-    schema,
-    ...route.sourceSegments,
-    route.canonical,
-    `${route.slug}.${route.format}`
-  ].join("/");
-}
-
 function createMediaRouter({ imageService, getConfig }) {
   const router = express.Router();
 
@@ -149,18 +137,10 @@ function createMediaRouter({ imageService, getConfig }) {
       String(request.params.format || "").toLowerCase() === "json";
     if (infoRequest) response.set("access-control-allow-origin", "*");
     try {
-      const route = parseImageRoute(request.params);
+      const route = parseImageRoute(request.originalUrl);
       const config = await getConfig();
       const project = imageService.validateProjectConfiguration(config);
       if (route.schema !== project.cache.schema) {
-        response.set({
-          "cache-control": "no-store",
-          location: imageLocation(route, project.cache.schema)
-        });
-        response.status(307).end();
-        return;
-      }
-      if (request.originalUrl.split("?", 1)[0] !== imageLocation(route)) {
         throw requestError(404, "The image route is not canonical.");
       }
       if (route.format === "json") {
@@ -169,7 +149,6 @@ function createMediaRouter({ imageService, getConfig }) {
         const etag = bodyEtag(body);
         response.type("application/json");
         publicHeaders(response, {
-          project: result.project,
           etag,
           length: body.length,
           mtime: result.source.mtime
@@ -197,11 +176,11 @@ function createMediaRouter({ imageService, getConfig }) {
   }
 
   router.get(
-    "/_image/:schema/:collection/:sha/:filename/:operations/:slug.:format",
+    "/:schema/media/:collection/:sha/:operations/:filename.:format",
     serveImage
   );
 
-  router.get("/:collection/:sha/:filename", async (request, response, next) => {
+  router.get("/media/:collection/:sha/:filename", async (request, response, next) => {
     try {
       const addressed = parseContentAddressedMediaPath(
         `/media/${String(request.params.collection || "")}/${String(request.params.sha || "")}/${String(request.params.filename || "")}`

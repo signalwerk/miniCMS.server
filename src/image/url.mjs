@@ -1,13 +1,7 @@
 import {
-  IMAGE_FORMATS,
-  imageServiceSlug,
-  parseContentAddressedMediaPath,
-  parseImageOperations,
+  parseImageServiceUrl,
   serializeImageOperations
 } from "@signalwerk/minicms/core/image-service";
-
-const ROUTE_FORMATS = new Set([...IMAGE_FORMATS, "json", "svg"]);
-const CACHE_SCHEMA_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 function requestError(status, message) {
   const error = new Error(message);
@@ -71,53 +65,19 @@ function normalizeMediaReference(value, { mediaFolder, publicFolder }) {
   return segments.join("/");
 }
 
-function parseImageRoute(params) {
-  const schema = String(params.schema || "");
-  if (!CACHE_SCHEMA_PATTERN.test(schema)) {
-    throw requestError(400, "The image cache schema is invalid.");
+function parseImageRoute(value) {
+  const parsed = parseImageServiceUrl(value);
+  if (!parsed || parsed.baseUrl) {
+    throw requestError(404, "The image route is not canonical.");
   }
-  const suppliedFormat = String(params.format || "");
-  const format = suppliedFormat.toLowerCase();
-  if (!ROUTE_FORMATS.has(format)) {
-    throw requestError(400, "The requested image format is not supported.");
-  }
-  if (suppliedFormat !== format) {
-    throw requestError(404, "The image output format is not canonical.");
-  }
-
-  let addressed;
-  let parsedOperations;
-  try {
-    addressed = parseContentAddressedMediaPath(
-      `/media/${String(params.collection || "")}/${String(params.sha || "")}/${String(params.filename || "")}`
-    );
-    if (!addressed) {
-      throw new TypeError("Invalid content-addressed media path.");
-    }
-    parsedOperations = parseImageOperations(String(params.operations || ""));
-  } catch (error) {
-    throw requestError(400, error.message);
-  }
-  const expectedSlug = imageServiceSlug(addressed.path);
-  if (params.slug !== expectedSlug) {
-    throw requestError(404, "The image slug is not canonical.");
-  }
-  const canonical = serializeImageOperations(parsedOperations);
-  if (params.operations !== canonical) {
-    throw requestError(404, "The image operation stack is not canonical.");
-  }
-
-  const operations = numericOperations(parsedOperations);
+  const canonical = serializeImageOperations(parsed.operations);
+  const operations = numericOperations(parsed.operations);
   return Object.freeze({
-    schema,
-    slug: expectedSlug,
-    format,
-    sourceSegments: Object.freeze([
-      addressed.collection,
-      addressed.sha,
-      addressed.filename
-    ]),
-    reference: addressed.path,
+    schema: parsed.schema,
+    collection: parsed.collection,
+    sha: parsed.sha,
+    filename: parsed.filename,
+    format: parsed.format,
     operations,
     canonical
   });

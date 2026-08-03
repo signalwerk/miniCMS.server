@@ -15,6 +15,11 @@ and URL generation use
 `@signalwerk/minicms/core/image-service`, so the static editor, website builds,
 and this service share one contract.
 
+The miniCMS ecosystem is currently developed as one controlled pre-release
+contract. Coordinated breaking changes across miniCMS, this service, and its
+consumer repositories are preferred over compatibility routes or redirects;
+backward compatibility is added only when explicitly required.
+
 ## Development
 
 Node.js 24 or newer is required.
@@ -51,31 +56,23 @@ site:
     quality: 82
     cache:
       schema: v1
-      strategy: revalidate
-      max_age: 0
 ```
 
 `fit` supports `cover`, `contain`, `fill`, and `inside`; raster output supports
 AVIF, GIF, JPEG, PNG, TIFF, and WebP. The cache schema is a short URL/cache
 namespace. Bump it when changing rendering semantics or when an immutable
-source URL is replaced. Strategies are:
-
-- `revalidate` (default): public responses use the configured `max_age` and
-  must revalidate afterward.
-- `immutable`: schema-based derivatives receive immutable cache headers. Use
-  this for the service's content-addressed uploads.
-- `disabled`: derivative disk and browser caching is disabled.
+source URL is replaced. It is the only cache setting.
 
 The shared helper builds the canonical readable route:
 
 ```text
-/media/_image/:schema/:collection/:sha256/:source-filename/:operation-stack/:source-slug.:format
+/<schema>/media/<collection>/<sha256>/<canonical-operations>/<output-name>.<format>
 ```
 
 For example:
 
 ```text
-/media/_image/v1/images/c5a4c3f1bb4b1ba46407335be8e668361cf6c0383fc266a3657c268bf31ed2cc/photo.png/resize@width:1600,height:900,fit:inside;quality@82/photo.webp
+/v1/media/images/c5a4c3f1bb4b1ba46407335be8e668361cf6c0383fc266a3657c268bf31ed2cc/resize@width:1600,height:900,fit:inside;quality@82/photo.webp
 ```
 
 For example, an operation stack can be
@@ -108,42 +105,56 @@ server's hard limits. A `.json` suffix returns curated
 source metadata with orientation-aware top-level `width` and `height`. It is
 public and sends `Access-Control-Allow-Origin: *`; it never exposes filesystem
 paths, raw EXIF/GPS, or ICC data. Metadata URLs always use the canonical
-`noop` operation. New URLs use the configured schema; older valid schemas
-redirect to it so a site and the service can be deployed independently.
-Encoded identifiers and flat service sources are not supported.
+`noop` operation. The requested schema must match the configured schema;
+mismatches return 404. The removed `/media/_image/*` form and schema redirects
+are deliberately unsupported. Encoded identifiers and flat service sources
+are not supported.
 
 SVG uses the same schema route with `noop` and `.svg`, but is never passed to
 Sharp. The original bytes are streamed unchanged with their SVG content type,
 `nosniff`, and a sandboxing CSP. Requests to rasterize SVG return 415. The
-ordinary `/media/:collection/:sha256/:filename` route resolves only regular,
-non-symlink files inside the configured media folder and always uses
-revalidation rather than the derivative's immutable policy. It supports byte ranges; non-image files
+ordinary `/media/<collection>/<sha256>/<filename>` route resolves only regular,
+non-symlink files inside the configured media folder and always revalidates.
+It supports byte ranges; non-image files
 are served as attachments with a restrictive CSP so uploaded documents cannot
 become active content on the OAuth/API origin.
 
-Raster cache entries are SHA-256 addressed by cache schema, pipeline/Sharp
-versions, a filesystem source signature, canonical operations, format, and
-active limits. Writes use a same-directory temporary file plus atomic rename;
-identical misses are deduplicated in-process. Hits and successfully cached
-misses stream from disk. Cache maintenance is coalesced in the background and
-bounds both bytes and entry count. It runs once after process startup for an
-existing cache and after writes; cache I/O failures degrade to an uncached
-response instead of taking the image service down.
+Before any raw, metadata, SVG, cached, or generated response is returned, the
+service hashes the selected source and requires it to match the SHA-256 route
+segment. Successful checks are memoized in a bounded cache keyed by the source
+file's stat identity, so unchanged large originals are not reread on every hit.
 
-`MINICMS_IMAGE_CACHE_DIR` names a cache parent, never a directory whose whole
-contents the service owns. The service appends its own fixed, project-keyed
-directory below it and only maintains that subtree. The default parent is the
-OS temporary directory; configure a durable local parent in production when
-derivatives should survive restarts.
+Raster caching is deliberately just a derivative directory. Each generated
+file mirrors its canonical public path below the cache root:
+
+```text
+<cache-dir>/<schema>/media/<collection>/<sha256>/<canonical-operations>/<output-name>.<format>
+```
+
+If that regular file exists, the service streams it. Otherwise Sharp produces
+the derivative once, atomically stores it at that readable path, and returns
+the generated bytes. A SHA-256 digest of the canonical route is used only for
+the ETag and in-process miss deduplication. Cache I/O failures degrade to an
+uncached response instead of taking the image service down. Metadata JSON and
+byte-preserving SVG responses are served directly and are not duplicated in
+the raster cache.
+
+There is no entry limit, byte limit, expiry, background scan, or eviction.
+Derivative files remain until an operator removes them. Bumping the schema
+starts a new namespace and requires updating every consumer in the same
+coordinated release; the old schema stops resolving immediately and its cache
+directory can be deleted. `MINICMS_IMAGE_CACHE_DIR` is the exact cache
+directory. It defaults to an OS temporary directory, so production should
+configure it on durable storage. Derivative, SVG, and info responses use one
+fixed `public, max-age=31536000, immutable` browser/CDN policy; original media
+continues to revalidate.
 
 Operational limits are deployment settings rather than editable project
 content:
 
-- `MINICMS_IMAGE_CACHE_DIR` (absolute cache parent)
-- `MINICMS_IMAGE_CACHE_MAX_BYTES` (default 2 GiB)
-- `MINICMS_IMAGE_CACHE_MAX_ENTRIES` (default 10,000)
+- `MINICMS_IMAGE_CACHE_DIR` (absolute derivative directory)
 - `MINICMS_IMAGE_CONCURRENCY` (default 2 transformations)
-- `MINICMS_IMAGE_QUEUE_LIMIT` (default 32 waiting transformations)
+- `MINICMS_IMAGE_QUEUE_LIMIT` (default 1024 waiting transformations)
 - `MINICMS_IMAGE_MAX_INPUT_PIXELS` (default Sharp's 268,402,689)
 - `MINICMS_IMAGE_MAX_OUTPUT_PIXELS` (default 32,000,000)
 - `MINICMS_IMAGE_MAX_OUTPUT_BYTES` (default 64 MiB)
@@ -174,7 +185,7 @@ the hash, and huge originals are never buffered into the Node.js heap.
 every security setting is valid:
 
 ```sh
-MINICMS_PUBLIC_URL=https://cms-api.example.com \
+MINICMS_PUBLIC_URL=https://media.signalwerk.ch \
 MINICMS_GITHUB_CLIENT_ID=replace-me \
 MINICMS_GITHUB_CLIENT_SECRET=replace-me \
 MINICMS_SESSION_SECRET=replace-with-at-least-32-random-characters \
@@ -192,13 +203,14 @@ The repository includes a production image and a Coolify-compatible
 `docker-compose.yml`. Configure these secrets in Coolify:
 
 ```text
-MINICMS_PUBLIC_URL=https://cms-api.example.com
 MINICMS_GITHUB_CLIENT_ID=replace-me
 MINICMS_GITHUB_CLIENT_SECRET=replace-me
 MINICMS_SESSION_SECRET=replace-with-at-least-32-random-characters
 ```
 
 Then deploy the Compose service and assign its domain to container port `8787`.
+The included Compose file fixes the service origin to
+`https://media.signalwerk.ch`.
 The service is exposed only to Coolify's proxy; Compose deliberately does not
 publish a host port. It runs as UID/GID `1000:1000`, so prepare the durable host
 directory with matching write access. The mounted directory must directly
@@ -206,6 +218,7 @@ contain `cms.config.yml` and `content/`:
 
 ```text
 /DATA/miniCMS/backend/data/
+├── .cache/
 ├── cms.config.yml
 └── content/
 ```
@@ -218,8 +231,8 @@ overlapping rolling replacements are not safe.
 Run one service replica per writable project root. OAuth state, bearer
 sessions, write coordination, and in-flight image work are process-local. Put
 a CDN or reverse proxy with request rate limits in front of the intentionally
-public `/media/` routes; per-instance Sharp concurrency and queue limits remain
-the final resource boundary.
+public raw `/media/*` and derivative `/:schema/media/*` routes; per-instance
+Sharp concurrency and queue limits remain the final resource boundary.
 
 - `MINICMS_PUBLIC_URL` is the service's exact HTTPS origin, without a path or
   trailing slash.
@@ -249,8 +262,9 @@ origin and nonce. All content API reads and writes require a bearer before
 large body parsers run. `/api/health`, `/api/ready`, and the authentication
 bootstrap routes are public. Health reports that the process is alive;
 readiness also validates the project and image configuration.
-The `/media/*` routes are intentionally public: these assets are website-public content,
-and ordinary image elements cannot attach an OAuth bearer header.
+The raw `/media/*` and derivative `/<schema>/media/*` routes are intentionally
+public: these assets are website-public content, and ordinary image elements
+cannot attach an OAuth bearer header.
 
 ## API
 
@@ -262,8 +276,9 @@ Public routes:
 - `GET /api/auth/github/start?origin=<origin>&nonce=<nonce>`
 - `GET /api/auth/github/callback`
 - `POST /api/auth/exchange`
-- `GET` and `HEAD /media/_image/:schema/:collection/:sha256/:filename/:operations/:slug.:format`
-- `GET` and `HEAD /media/:collection/:sha256/:filename` for originals/downloads
+- `GET` and `HEAD`
+  `/<schema>/media/<collection>/<sha256>/<canonical-operations>/<output-name>.<format>`
+- `GET` and `HEAD /media/<collection>/<sha256>/<filename>` for originals/downloads
 
 Authenticated production routes:
 

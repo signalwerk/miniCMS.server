@@ -3,6 +3,10 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
 import {
+  imageServiceSlug,
+  parseContentAddressedMediaPath
+} from "@signalwerk/minicms/core/image-service";
+import {
   imageProjectConfiguration,
   operationalImageConfiguration
 } from "./config.mjs";
@@ -11,7 +15,6 @@ import {
   requestError
 } from "./url.mjs";
 
-const PIPELINE_VERSION = "minicms-image-v3";
 const INPUT_FORMATS = new Set([
   "avif",
   "gif",
@@ -22,13 +25,8 @@ const INPUT_FORMATS = new Set([
   "webp"
 ]);
 const SVG_PREFIX_BYTES = 128 * 1024;
-const CACHE_FILE_PATTERN = /^[a-f0-9]{64}\.(?:avif|gif|jpg|png|tiff|webp)$/;
-const CACHE_TEMP_PATTERN = /^\.[a-f0-9]{64}\.(?:avif|gif|jpg|png|tiff|webp)\.\d+\.[a-f0-9]{16}\.tmp$/;
-const CACHE_SCHEMA_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
-const CACHE_SHARD_PATTERN = /^[a-f0-9]{2}$/;
-const STALE_CACHE_TEMP_MS = 60 * 60 * 1000;
-const CACHE_MAINTENANCE_DELAY_MS = 1000;
 const CROP_GEOMETRY_EPSILON = 1e-7;
+const VERIFIED_SOURCE_LIMIT = 1024;
 const AVIF_BRANDS = new Set(["avif", "avis"]);
 const HEIF_BRANDS = new Set([
   "heic",
@@ -97,6 +95,67 @@ async function openUnchangedFile(source, signature) {
     }
     throw error;
   }
+}
+
+async function hashUnchangedFile(source) {
+  let handle = null;
+  try {
+    handle = await fs.open(source.path, "r");
+    const openedStat = await handle.stat({ bigint: true });
+    if (
+      !openedStat.isFile() ||
+      statSignature(openedStat) !== source.signature
+    ) {
+      throw sourceError(409, "The media file changed while it was verified.");
+    }
+    const hash = createHash("sha256");
+    for await (const chunk of handle.createReadStream({ autoClose: false })) {
+      hash.update(chunk);
+    }
+    const finishedStat = await handle.stat({ bigint: true });
+    if (statSignature(finishedStat) !== source.signature) {
+      throw sourceError(409, "The media file changed while it was verified.");
+    }
+    return hash.digest("hex");
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") {
+      throw sourceError(409, "The media file changed while it was verified.");
+    }
+    throw error;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+function createSourceHashResolver({
+  hashSource = hashUnchangedFile,
+  maxEntries = VERIFIED_SOURCE_LIMIT
+} = {}) {
+  const entries = new Map();
+  return async (source) => {
+    const cached = entries.get(source.path);
+    if (cached?.signature === source.signature) {
+      entries.delete(source.path);
+      entries.set(source.path, cached);
+      return cached.pending;
+    }
+
+    const entry = {
+      signature: source.signature,
+      pending: hashSource(source)
+    };
+    entries.delete(source.path);
+    entries.set(source.path, entry);
+    while (entries.size > maxEntries) {
+      entries.delete(entries.keys().next().value);
+    }
+    try {
+      return await entry.pending;
+    } catch (error) {
+      if (entries.get(source.path) === entry) entries.delete(source.path);
+      throw error;
+    }
+  };
 }
 
 async function safeDirectory(rootDir, configuredMediaFolder, { create = false } = {}) {
@@ -192,6 +251,72 @@ async function resolveMediaSource({ rootDir, config, reference }) {
     size: Number(stat.size),
     mtime: new Date(Number(stat.mtimeMs))
   });
+}
+
+async function resolveImageSource({
+  rootDir,
+  config,
+  route,
+  sourceHash = hashUnchangedFile
+}) {
+  const configuredMediaFolder = config.site?.media_folder || "content/media";
+  const { declaredMediaRoot, trustedMediaRoot } = await safeDirectory(
+    rootDir,
+    configuredMediaFolder
+  );
+  let directory = declaredMediaRoot;
+  for (const segment of [route.collection, route.sha]) {
+    directory = path.join(directory, segment);
+    let stat;
+    try {
+      stat = await fs.lstat(directory);
+    } catch (error) {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") {
+        throw sourceError(404, "The requested media file does not exist.");
+      }
+      throw error;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw sourceError(404, "The requested media file does not exist.");
+    }
+    directory = await fs.realpath(directory);
+    if (!isInside(trustedMediaRoot, directory)) {
+      throw sourceError(404, "The requested media file does not exist.");
+    }
+  }
+
+  const entries = await fs.readdir(directory, { withFileTypes: true }).catch(
+    (error) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") {
+        throw sourceError(404, "The requested media file does not exist.");
+      }
+      throw error;
+    }
+  );
+  const candidates = entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter((filename) => {
+      const addressed = parseContentAddressedMediaPath(
+        `/media/${route.collection}/${route.sha}/${filename}`
+      );
+      return addressed && imageServiceSlug(addressed.path) === route.filename;
+    })
+    .sort((left, right) => left.localeCompare(right));
+
+  for (const filename of candidates) {
+    try {
+      const source = await resolveMediaSource({
+        rootDir,
+        config,
+        reference: `/media/${route.collection}/${route.sha}/${filename}`
+      });
+      if (await sourceHash(source) === route.sha) return source;
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+  }
+  throw sourceError(404, "The requested media file does not exist.");
 }
 
 async function prefixOf(filePath, size = SVG_PREFIX_BYTES) {
@@ -802,92 +927,70 @@ async function computeRaster(source, route, operational, detectedFormat) {
   return result.data;
 }
 
-function processorVersion() {
-  return {
-    pipeline: PIPELINE_VERSION,
-    sharp: sharp.versions.sharp,
-    vips: sharp.versions.vips
-  };
-}
-
-function cacheKey({ route, sourceSignature, operational }) {
+function cacheKey(route) {
   return createHash("sha256")
     .update(
       JSON.stringify({
         schema: route.schema,
-        processor: processorVersion(),
-        source: sourceSignature,
+        collection: route.collection,
+        sha: route.sha,
         operations: route.canonical,
-        format: route.format,
-        limits: {
-          maxEdge: operational.maxEdge,
-          maxOutputPixels: operational.maxOutputPixels
-        }
+        filename: route.filename,
+        format: route.format
       })
     )
     .digest("hex");
 }
 
-function cacheExtension(format) {
-  return format === "jpeg" ? "jpg" : format;
-}
-
-async function ensureOwnedCacheRoot(cacheRoot, rootDir) {
-  const serviceRoot = path.dirname(cacheRoot);
-  const configuredParent = path.dirname(serviceRoot);
-  await fs.mkdir(configuredParent, { recursive: true });
-  await assertSafeCacheParent(configuredParent, rootDir);
-  for (const directory of [serviceRoot, cacheRoot]) {
-    try {
-      await fs.mkdir(directory, { mode: 0o700 });
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-    }
-    const stat = await fs.lstat(directory);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
-      throw new Error("The image cache owned directory is not a regular directory.");
-    }
-    await fs.chmod(directory, 0o700);
+async function ensureCacheRoot(cacheRoot, rootDir) {
+  await fs.mkdir(cacheRoot, { recursive: true, mode: 0o700 });
+  const rootStat = await fs.lstat(cacheRoot);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error("The image cache root is not a regular directory.");
   }
-}
-
-async function assertSafeCacheParent(configuredParent, rootDir) {
-  const trustedParent = await fs.realpath(configuredParent);
+  const trustedRoot = await fs.realpath(cacheRoot);
   const contentRoot = await fs.realpath(path.resolve(rootDir, "content")).catch(
     (error) => {
       if (error.code === "ENOENT") return null;
       throw error;
     }
   );
-  if (contentRoot && isInside(contentRoot, trustedParent)) {
-    throw new Error("The image cache parent must stay outside project content.");
+  if (contentRoot && isInside(contentRoot, trustedRoot)) {
+    throw new Error("The image cache root must stay outside project content.");
   }
+  return trustedRoot;
 }
 
-async function assertOwnedCacheRoot(cacheRoot, rootDir) {
-  const serviceRoot = path.dirname(cacheRoot);
-  await assertSafeCacheParent(path.dirname(serviceRoot), rootDir);
-  for (const directory of [serviceRoot, cacheRoot]) {
-    const stat = await fs.lstat(directory);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
-      throw new Error("The image cache owned directory is not a regular directory.");
-    }
-  }
-}
-
-async function ensureOwnedCacheDirectory(cacheRoot, schema, shard) {
-  if (!CACHE_SCHEMA_PATTERN.test(schema) || !CACHE_SHARD_PATTERN.test(shard)) {
+function cacheRouteSegments(route) {
+  const segments = [
+    route.schema,
+    "media",
+    route.collection,
+    route.sha,
+    route.canonical
+  ];
+  const output = `${route.filename}.${route.format}`;
+  if (
+    [...segments, output].some(
+      (segment) =>
+        typeof segment !== "string" ||
+        !segment ||
+        segment === "." ||
+        segment === ".." ||
+        Buffer.byteLength(segment, "utf8") > 255 ||
+        /[\\/\u0000-\u001f\u007f]/.test(segment)
+    )
+  ) {
     throw new Error("The image cache path is invalid.");
   }
-  const rootStat = await fs.lstat(cacheRoot);
-  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
-    throw new Error("The image cache owned directory is not a regular directory.");
-  }
-  const trustedRoot = await fs.realpath(cacheRoot);
-  for (const directory of [
-    path.join(cacheRoot, schema),
-    path.join(cacheRoot, schema, shard)
-  ]) {
+  return { directories: segments, output };
+}
+
+async function ensureCacheDirectoryOnDisk(cacheRoot, rootDir, segments) {
+  const trustedRoot = await ensureCacheRoot(cacheRoot, rootDir);
+  let directory = trustedRoot;
+  for (const segment of segments) {
+    directory = path.join(directory, segment);
     try {
       await fs.mkdir(directory, { mode: 0o700 });
     } catch (error) {
@@ -897,7 +1000,8 @@ async function ensureOwnedCacheDirectory(cacheRoot, schema, shard) {
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       throw new Error("The image cache directory is not a regular directory.");
     }
-    if (!isInside(trustedRoot, await fs.realpath(directory))) {
+    directory = await fs.realpath(directory);
+    if (!isInside(trustedRoot, directory)) {
       throw new Error("The image cache directory resolves outside its owned root.");
     }
   }
@@ -910,17 +1014,18 @@ async function readCached(cachePath, operational) {
     if (stat.isSymbolicLink() || !stat.isFile()) return null;
     if (
       stat.size < 1 ||
-      stat.size > operational.maxOutputBytes ||
-      stat.size > operational.cacheMaxBytes
+      stat.size > operational.maxOutputBytes
     ) {
-      await fs.unlink(cachePath).catch((error) => {
-        if (error.code !== "ENOENT") throw error;
-      });
-      return null;
+      throw new Error("The image cache contains an invalid entry.");
     }
     handle = await fs.open(cachePath, "r");
     const openedStat = await handle.stat();
-    if (!openedStat.isFile() || openedStat.size !== stat.size) {
+    if (
+      !openedStat.isFile() ||
+      openedStat.dev !== stat.dev ||
+      openedStat.ino !== stat.ino ||
+      openedStat.size !== stat.size
+    ) {
       await handle.close();
       return null;
     }
@@ -929,97 +1034,6 @@ async function readCached(cachePath, operational) {
     await handle?.close().catch(() => {});
     if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
     throw error;
-  }
-}
-
-async function cacheEntries(cacheRoot, operational) {
-  const entries = [];
-  const staleBefore = Date.now() - STALE_CACHE_TEMP_MS;
-  const readDirectory = async (directory) =>
-    fs.readdir(directory, { withFileTypes: true }).catch((error) => {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") return [];
-      throw error;
-    });
-
-  for (const schema of await readDirectory(cacheRoot)) {
-    if (!schema.isDirectory() || !CACHE_SCHEMA_PATTERN.test(schema.name)) {
-      continue;
-    }
-    const schemaPath = path.join(cacheRoot, schema.name);
-    for (const shard of await readDirectory(schemaPath)) {
-      if (!shard.isDirectory() || !CACHE_SHARD_PATTERN.test(shard.name)) {
-        continue;
-      }
-      const shardPath = path.join(schemaPath, shard.name);
-      for (const child of await readDirectory(shardPath)) {
-        const childPath = path.join(shardPath, child.name);
-        if (child.isFile() && CACHE_TEMP_PATTERN.test(child.name)) {
-          const stat = await fs.lstat(childPath).catch((error) => {
-            if (error.code === "ENOENT") return null;
-            throw error;
-          });
-          if (!stat) continue;
-          if (
-            stat.isFile() &&
-            !stat.isSymbolicLink() &&
-            stat.mtimeMs < staleBefore
-          ) {
-            await fs.unlink(childPath).catch((error) => {
-              if (error.code !== "ENOENT") throw error;
-            });
-          }
-        } else if (child.isFile() && CACHE_FILE_PATTERN.test(child.name)) {
-          const stat = await fs.lstat(childPath).catch((error) => {
-            if (error.code === "ENOENT") return null;
-            throw error;
-          });
-          if (!stat) continue;
-          if (stat.isFile() && !stat.isSymbolicLink()) {
-            if (
-              stat.size < 1 ||
-              stat.size > operational.maxOutputBytes ||
-              stat.size > operational.cacheMaxBytes
-            ) {
-              await fs.unlink(childPath).catch((error) => {
-                if (error.code !== "ENOENT") throw error;
-              });
-            } else {
-              entries.push({
-                path: childPath,
-                size: stat.size,
-                mtimeMs: stat.mtimeMs
-              });
-            }
-          }
-        }
-      }
-    }
-  }
-  return entries;
-}
-
-async function enforceCacheBounds(cacheRoot, operational) {
-  const entries = await cacheEntries(cacheRoot, operational);
-  let bytes = entries.reduce((total, entry) => total + entry.size, 0);
-  let count = entries.length;
-  entries.sort(
-    (left, right) =>
-      left.mtimeMs - right.mtimeMs || left.path.localeCompare(right.path)
-  );
-  for (const entry of entries) {
-    if (
-      count <= operational.cacheMaxEntries &&
-      bytes <= operational.cacheMaxBytes
-    ) {
-      break;
-    }
-    try {
-      await fs.unlink(entry.path);
-      count -= 1;
-      bytes -= entry.size;
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
   }
 }
 
@@ -1053,9 +1067,9 @@ function createImageService({
   const operational = operationalImageConfiguration({ rootDir, environment });
   const limited = createLimiter(operational);
   const inFlight = new Map();
-  let cacheMaintenanceRunning = false;
-  let cacheMaintenanceRequested = false;
-  let cacheMaintenanceTimer = null;
+  const sourceHash = createSourceHashResolver({
+    hashSource: (source) => limited(() => hashUnchangedFile(source))
+  });
 
   function warnCache(action, error) {
     if (typeof logger?.warn !== "function") return;
@@ -1064,46 +1078,39 @@ function createImageService({
     );
   }
 
-  async function ensureCacheDirectory(schema, shard) {
-    await ensureOwnedCacheRoot(operational.cacheRoot, rootDir);
-    await ensureOwnedCacheDirectory(operational.cacheRoot, schema, shard);
-  }
-
-  function scheduleCacheMaintenance() {
-    cacheMaintenanceRequested = true;
-    if (cacheMaintenanceRunning || cacheMaintenanceTimer) return;
-    cacheMaintenanceTimer = setTimeout(async () => {
-      cacheMaintenanceTimer = null;
-      cacheMaintenanceRunning = true;
-      try {
-        cacheMaintenanceRequested = false;
-        await assertOwnedCacheRoot(operational.cacheRoot, rootDir);
-        await enforceCacheBounds(operational.cacheRoot, operational);
-      } catch (error) {
-        if (error.code !== "ENOENT" && error.code !== "ENOTDIR") {
-          warnCache("maintenance", error);
-        }
-      } finally {
-        cacheMaintenanceRunning = false;
-        if (cacheMaintenanceRequested) scheduleCacheMaintenance();
-      }
-    }, CACHE_MAINTENANCE_DELAY_MS);
-    cacheMaintenanceTimer.unref?.();
+  async function ensureCacheDirectory(route) {
+    const cacheRoute = cacheRouteSegments(route);
+    await ensureCacheDirectoryOnDisk(
+      operational.cacheRoot,
+      rootDir,
+      cacheRoute.directories
+    );
+    return cacheRoute;
   }
 
   async function sourceContext(reference, snapshot) {
     const config = snapshot?.config ?? await getConfig();
     const source = await resolveMediaSource({ rootDir, config, reference });
+    const addressed = parseContentAddressedMediaPath(reference, config);
+    if (!addressed || await sourceHash(source) !== addressed.sha) {
+      throw sourceError(404, "The requested media file does not exist.");
+    }
     return { config, source, sourceSignature: source.signature };
   }
 
-  async function context(reference, snapshot) {
-    const result = await sourceContext(reference, snapshot);
+  async function context(route, snapshot) {
+    const config = snapshot?.config ?? await getConfig();
+    const source = await resolveImageSource({
+      rootDir,
+      config,
+      route,
+      sourceHash
+    });
     const project = snapshot?.project ?? imageProjectConfiguration(
-      result.config,
+      config,
       operational
     );
-    return { ...result, project };
+    return { config, source, sourceSignature: source.signature, project };
   }
 
   async function assertSourceUnchanged(source, signature) {
@@ -1117,16 +1124,13 @@ function createImageService({
     const mediaType = await sourceMediaType(result.source);
     return {
       ...result,
-      project: {
-        cache: { strategy: "revalidate", max_age: 0 }
-      },
       mediaType,
       svg: mediaType.kind === "svg"
     };
   }
 
   async function info(route, snapshot) {
-    const result = await context(route.reference, snapshot);
+    const result = await context(route, snapshot);
     if (route.canonical !== "noop") {
       throw sourceError(400, "Image metadata routes must use the noop operation.");
     }
@@ -1152,7 +1156,7 @@ function createImageService({
   }
 
   async function transformed(route, snapshot) {
-    const result = await context(route.reference, snapshot);
+    const result = await context(route, snapshot);
     validateRequestedDimensions(route.operations, operational);
     const mediaType = await sourceMediaType(result.source);
     if (route.format === "svg") {
@@ -1181,41 +1185,34 @@ function createImageService({
       throw sourceError(415, "The media file is not a supported raster image.");
     }
 
-    const key = cacheKey({
-      route,
-      sourceSignature: result.sourceSignature,
-      operational
-    });
+    const key = cacheKey(route);
+    const cacheRoute = cacheRouteSegments(route);
     const cachePath = path.join(
       operational.cacheRoot,
-      route.schema,
-      key.slice(0, 2),
-      `${key}.${cacheExtension(route.format)}`
+      ...cacheRoute.directories,
+      cacheRoute.output
     );
-    const cacheEnabled = result.project.cache.strategy !== "disabled";
-    if (cacheEnabled) {
-      let cached = null;
+    let cached = null;
+    try {
+      await ensureCacheDirectory(route);
+      cached = await readCached(cachePath, operational);
+    } catch (error) {
+      warnCache("read", error);
+    }
+    if (cached) {
       try {
-        await ensureCacheDirectory(route.schema, key.slice(0, 2));
-        cached = await readCached(cachePath, operational);
+        await assertSourceUnchanged(result.source, result.sourceSignature);
       } catch (error) {
-        warnCache("read", error);
+        await cached.fileHandle.close().catch(() => {});
+        throw error;
       }
-      if (cached) {
-        try {
-          await assertSourceUnchanged(result.source, result.sourceSignature);
-        } catch (error) {
-          await cached.fileHandle.close().catch(() => {});
-          throw error;
-        }
-        return {
-          ...result,
-          svg: false,
-          ...cached,
-          etag: quotedEtag(key),
-          cacheStatus: "hit"
-        };
-      }
+      return {
+        ...result,
+        svg: false,
+        ...cached,
+        etag: quotedEtag(key),
+        cacheStatus: "hit"
+      };
     }
 
     if (!inFlight.has(key)) {
@@ -1228,18 +1225,15 @@ function createImageService({
         )
       ).then(async (buffer) => {
         await assertSourceUnchanged(result.source, result.sourceSignature);
-        let cacheable = cacheEnabled && buffer.length <= operational.cacheMaxBytes;
-        if (cacheable) {
-          try {
-            await ensureCacheDirectory(route.schema, key.slice(0, 2));
-            await writeCacheAtomic(cachePath, buffer);
-            scheduleCacheMaintenance();
-          } catch (error) {
-            cacheable = false;
-            warnCache("write", error);
-          }
+        let stored = false;
+        try {
+          await ensureCacheDirectory(route);
+          await writeCacheAtomic(cachePath, buffer);
+          stored = true;
+        } catch (error) {
+          warnCache("write", error);
         }
-        return { buffer, cacheable };
+        return { buffer, stored };
       }).finally(() => {
         inFlight.delete(key);
       });
@@ -1247,34 +1241,13 @@ function createImageService({
     }
     const generated = await inFlight.get(key);
     const { buffer } = generated;
-    if (generated.cacheable) {
-      try {
-        await ensureCacheDirectory(route.schema, key.slice(0, 2));
-        const cached = await readCached(cachePath, operational);
-        if (cached) {
-          return {
-            ...result,
-            svg: false,
-            ...cached,
-            etag: quotedEtag(key),
-            cacheStatus: "miss"
-          };
-        }
-      } catch (error) {
-        warnCache("open", error);
-      }
-    }
     return {
       ...result,
       svg: false,
       buffer,
       length: buffer.length,
       etag: quotedEtag(key),
-      cacheStatus: generated.cacheable
-        ? "miss"
-        : cacheEnabled
-          ? "uncached"
-          : "disabled"
+      cacheStatus: generated.stored ? "miss" : "uncached"
     };
   }
 
@@ -1287,8 +1260,6 @@ function createImageService({
     return imageProjectConfiguration(config, operational, status);
   }
 
-  scheduleCacheMaintenance();
-
   return Object.freeze({
     info,
     raw,
@@ -1298,4 +1269,9 @@ function createImageService({
   });
 }
 
-export { createImageService, detectImageFileType, resolveMediaSource };
+export {
+  createImageService,
+  detectImageFileType,
+  resolveImageSource,
+  resolveMediaSource
+};
