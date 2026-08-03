@@ -1,0 +1,23 @@
+services:
+  minicms-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "8787"
+      MINICMS_PROJECT_ROOT: /data
+      MINICMS_PUBLIC_URL: "${MINICMS_PUBLIC_URL:?Set MINICMS_PUBLIC_URL}"
+      MINICMS_ADMIN_ORIGINS: "${MINICMS_ADMIN_ORIGINS:?Set MINICMS_ADMIN_ORIGINS}"
+      MINICMS_GITHUB_CLIENT_ID: "${MINICMS_GITHUB_CLIENT_ID:?Set MINICMS_GITHUB_CLIENT_ID}"
+      MINICMS_GITHUB_CLIENT_SECRET: "${MINICMS_GITHUB_CLIENT_SECRET:?Set MINICMS_GITHUB_CLIENT_SECRET}"
+      MINICMS_GITHUB_ALLOWED_LOGIN: signalwer
+      MINICMS_SESSION_SECRET: "${MINICMS_SESSION_SECRET:?Set MINICMS_SESSION_SECRET}"
+      MINICMS_IMAGE_CACHE_DIR: /data/.cache
+    volumes:
+      - "/DATA/miniCMS/backend/data:/data"
+    expose:
+      - "8787"

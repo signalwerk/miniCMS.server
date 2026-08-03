@@ -1,0 +1,24 @@
+{
+  "name": "@signalwerk/minicms-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Filesystem content API for miniCMS.",
+  "type": "module",
+  "bin": {
+    "minicms-api": "./bin/minicms-api.mjs"
+  },
+  "scripts": {
+    "dev": "node ./bin/minicms-api.mjs dev",
+    "start": "node ./bin/minicms-api.mjs start",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@signalwerk/minicms": "https://github.com/signalwerk/miniCMS/archive/95e04bba45321600c97ab426dc688fd2cdd7d459.tar.gz",
+    "express": "^5.1.0",
+    "mime-types": "^3.0.1",
+    "sharp": "^0.35.3"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
