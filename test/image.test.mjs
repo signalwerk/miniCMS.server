@@ -367,6 +367,36 @@ test("transforms content-addressed raster images, publishes safe info, and reuse
   });
 });
 
+test("renders JPEG derivatives with both .jpg and .jpeg endings", async () => {
+  await withServer(async ({ baseUrl, cacheDir, config, media }) => {
+    const routes = [];
+    for (const format of ["jpg", "jpeg"]) {
+      const route = servicePath(media.photo.source, config, {
+        width: 32,
+        height: 32,
+        format
+      });
+      routes.push(route);
+      assert.match(route, new RegExp(`/photo\\.${format}$`));
+
+      const response = await fetch(`${baseUrl}${route}`);
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get("content-type"), /^image\/jpeg/);
+      const metadata = await sharp(
+        Buffer.from(await response.arrayBuffer())
+      ).metadata();
+      assert.equal(metadata.format, "jpeg");
+    }
+
+    assert.deepEqual(
+      (await cacheFiles(cacheDir))
+        .map((file) => path.relative(cacheDir, file))
+        .sort(),
+      routes.map((route) => route.slice(1)).sort()
+    );
+  });
+});
+
 test("uploads directly into the readable content-addressed image route", async () => {
   await withServer(async ({ baseUrl, config, mediaDir }) => {
     const original = await sharp({

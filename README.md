@@ -59,9 +59,11 @@ site:
 ```
 
 `fit` supports `cover`, `contain`, `fill`, and `inside`; raster output supports
-AVIF, GIF, JPEG, PNG, TIFF, and WebP. The cache schema is a short URL/cache
-namespace. Bump it when changing rendering semantics or when an immutable
-source URL is replaced. It is the only cache setting.
+AVIF, GIF, JPEG, PNG, TIFF, and WebP. JPEG accepts both `format: jpg` and
+`format: jpeg`, preserving `.jpg` or `.jpeg` respectively in the URL and cache
+filename. The cache schema is a short URL/cache namespace. Bump it when
+changing rendering semantics or when an immutable source URL is replaced. It
+is the only cache setting.
 
 The shared helper builds the canonical readable route:
 

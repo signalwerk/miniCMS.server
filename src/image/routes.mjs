@@ -13,6 +13,7 @@ const CONTENT_TYPES = Object.freeze({
   avif: "image/avif",
   gif: "image/gif",
   heif: "image/heif",
+  jpg: "image/jpeg",
   jpeg: "image/jpeg",
   png: "image/png",
   svg: "image/svg+xml; charset=utf-8",

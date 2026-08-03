@@ -891,7 +891,9 @@ function applyOperations(image, operations, metadata) {
 }
 
 function formatOutput(image, format, quality) {
-  if (format === "jpeg") return image.jpeg({ quality });
+  if (format === "jpg" || format === "jpeg") {
+    return image.jpeg({ quality });
+  }
   if (format === "png") return image.png({ quality });
   if (format === "webp") return image.webp({ quality });
   if (format === "avif") return image.avif({ quality });

@@ -91,6 +91,9 @@ same change unless backward compatibility is explicitly requested.
   best-effort. There is no maintenance, expiry, capacity accounting, or
   eviction. Metadata JSON and byte-preserving SVG responses are not copied to
   the raster cache.
+- JPEG derivatives accept both `jpg` and `jpeg` as canonical output formats;
+  both use `image/jpeg` bytes and MIME type while retaining their requested
+  extension in the URL and mirrored cache filename.
 - Raw reusable `/media/<collection>/<sha256>/<filename>` files always revalidate
   and support byte ranges;
   non-image files are attachments on the API/auth origin. Only schema-based
