@@ -78,7 +78,7 @@ Usage:
   minicms-api start [--project-root <path>]
 
 Development is unauthenticated and loopback-only. Production start always
-requires the GitHub OAuth and session environment documented in README.md.`);
+requires the session environment documented in README.md.`);
   if (command) process.exitCode = 1;
 }
 

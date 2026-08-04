@@ -271,7 +271,7 @@ export function createApp({
   app.use("/api", authentication.requireSession);
 
   // Authentication is deliberately resolved before potentially large request
-  // bodies are parsed. The public exchange endpoint owns its small parser.
+  // bodies are parsed. The public GitHub-token bootstrap owns its small parser.
   app.post("/api/media/:collectionName", async (request, response, next) => {
     try {
       const { config, collection } = await getCollection(

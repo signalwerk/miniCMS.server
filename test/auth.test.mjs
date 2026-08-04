@@ -1,12 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createApp } from "../src/app.mjs";
 import {
-  EXCHANGE_CODE_TTL_MS,
   SESSION_TTL_MS,
   createDevelopmentAuthentication,
   createProductionAuthentication
@@ -18,17 +16,13 @@ import {
 
 const ADMIN_ORIGIN = "https://admin.example";
 const SECOND_ADMIN_ORIGIN = "https://another-admin.example:8443";
-const PUBLIC_URL = "https://api.example";
-const GITHUB_ACCESS_TOKEN = "github-access-token-that-must-stay-server-side";
+const GITHUB_ACCESS_TOKEN = "github-repo-token-delivered-by-the-auth-worker";
 const READ_TOKEN = "machine-read-token-with-at-least-32-characters";
 
 function validEnvironment(overrides = {}) {
   return {
     HOST: "127.0.0.1",
     PORT: "8787",
-    MINICMS_PUBLIC_URL: PUBLIC_URL,
-    MINICMS_GITHUB_CLIENT_ID: "github-client-id",
-    MINICMS_GITHUB_CLIENT_SECRET: "github-client-secret",
     MINICMS_SESSION_SECRET: "a-test-session-secret-with-at-least-32-characters",
     ...overrides
   };
@@ -86,25 +80,38 @@ function deterministicRandomBytes() {
   };
 }
 
-function githubFetch({ login = "SignalWerk" } = {}) {
+function githubFetch({
+  id = 992878,
+  login = "SignalWerk",
+  status = 200,
+  body,
+  malformed = false,
+  failure
+} = {}) {
   const calls = [];
   const fetchImpl = async (input, options = {}) => {
     const url = String(input);
     calls.push({ url, options });
-    if (url === "https://github.com/login/oauth/access_token") {
-      return Response.json({ access_token: GITHUB_ACCESS_TOKEN });
-    }
-    if (url === "https://api.github.com/user") {
-      assert.equal(
-        options.headers.authorization,
-        `Bearer ${GITHUB_ACCESS_TOKEN}`
-      );
-      return Response.json({
-        login,
-        avatar_url: "https://avatars.example/signalwerk.png"
+    assert.equal(url, "https://api.github.com/user");
+    assert.equal(
+      options.headers.authorization,
+      `Bearer ${GITHUB_ACCESS_TOKEN}`
+    );
+    if (failure) throw failure;
+    if (malformed) {
+      return new Response("{", {
+        status,
+        headers: { "content-type": "application/json" }
       });
     }
-    throw new Error(`Unexpected GitHub request: ${url}`);
+    return Response.json(
+      body ?? {
+        id,
+        login,
+        avatar_url: "https://avatars.example/signalwerk.png"
+      },
+      { status }
+    );
   };
   return { calls, fetchImpl };
 }
@@ -112,13 +119,13 @@ function githubFetch({ login = "SignalWerk" } = {}) {
 async function withProductionServer(
   run,
   {
-    login = "SignalWerk",
+    github: githubOptions = {},
     clock = { value: Date.parse("2026-08-02T12:00:00Z") },
     environment = {}
   } = {}
 ) {
   const rootDir = await makeFixture();
-  const github = githubFetch({ login });
+  const github = githubFetch(githubOptions);
   const configuration = productionConfiguration({
     environment: validEnvironment(environment),
     projectRoot: rootDir
@@ -139,78 +146,23 @@ async function withProductionServer(
   }
 }
 
-async function beginAuthentication(baseUrl, nonce, origin = ADMIN_ORIGIN) {
-  const url = new URL("/api/auth/github/start", baseUrl);
-  url.searchParams.set("origin", origin);
-  url.searchParams.set("nonce", nonce);
-  const response = await fetch(url, {
-    redirect: "manual",
-    headers: { origin }
-  });
-  assert.equal(response.status, 302);
-  const authorizationUrl = new URL(response.headers.get("location"));
-  assert.equal(authorizationUrl.origin, "https://github.com");
-  assert.equal(authorizationUrl.pathname, "/login/oauth/authorize");
-  assert.equal(authorizationUrl.searchParams.get("client_id"), "github-client-id");
-  assert.equal(
-    authorizationUrl.searchParams.get("redirect_uri"),
-    `${PUBLIC_URL}/api/auth/github/callback`
-  );
-  assert.equal(authorizationUrl.searchParams.get("code_challenge_method"), "S256");
-  assert.equal(authorizationUrl.searchParams.get("scope"), null);
-  return authorizationUrl;
-}
-
-function callbackPayload(html) {
-  const match = html.match(/const payload = (\{[^;]+\});/);
-  assert.ok(match, "callback HTML contains a postMessage payload");
-  return JSON.parse(match[1]);
-}
-
-async function completeCallback(baseUrl, state, code = "github-code") {
-  const callback = new URL("/api/auth/github/callback", baseUrl);
-  callback.searchParams.set("state", state);
-  callback.searchParams.set("code", code);
-  return fetch(callback);
-}
-
-async function exchange(baseUrl, payload, origin = ADMIN_ORIGIN) {
-  return fetch(`${baseUrl}/api/auth/exchange`, {
+function authenticate(baseUrl, token = GITHUB_ACCESS_TOKEN) {
+  return fetch(`${baseUrl}/api/auth/github`, {
     method: "POST",
     headers: {
-      origin,
+      origin: ADMIN_ORIGIN,
       "content-type": "application/json"
     },
-    body: JSON.stringify({
-      code: payload.code,
-      nonce: payload.nonce,
-      origin
-    })
+    body: JSON.stringify({ token })
   });
 }
 
-test("production configuration fails closed and development refuses a public host", () => {
-  const required = [
-    "MINICMS_PUBLIC_URL",
-    "MINICMS_GITHUB_CLIENT_ID",
-    "MINICMS_GITHUB_CLIENT_SECRET",
-    "MINICMS_SESSION_SECRET"
-  ];
-  for (const name of required) {
-    const environment = validEnvironment();
-    delete environment[name];
-    assert.throws(
-      () => productionConfiguration({ environment }),
-      new RegExp(`${name} is required`)
-    );
-  }
-
+test("production configuration needs only service session credentials", () => {
+  const environment = validEnvironment();
+  delete environment.MINICMS_SESSION_SECRET;
   assert.throws(
-    () =>
-      productionConfiguration({
-        environment: validEnvironment({ MINICMS_PUBLIC_URL: "http://api.example" })
-      }),
-    /must use HTTPS/
+    () => productionConfiguration({ environment }),
+    /MINICMS_SESSION_SECRET is required/
   );
   assert.throws(
     () =>
@@ -219,10 +171,14 @@ test("production configuration fails closed and development refuses a public hos
       }),
     /at least 32 characters/
   );
-  assert.equal(
-    productionConfiguration({ environment: validEnvironment() }).readToken,
-    ""
-  );
+
+  const configuration = productionConfiguration({
+    environment: validEnvironment()
+  });
+  assert.equal(configuration.publicUrl, undefined);
+  assert.equal(configuration.githubClientId, undefined);
+  assert.equal(configuration.githubClientSecret, undefined);
+  assert.equal(configuration.readToken, "");
   assert.equal(
     productionConfiguration({
       environment: validEnvironment({ MINICMS_READ_TOKEN: READ_TOKEN })
@@ -286,9 +242,11 @@ test("development session stays locally authenticated without a login", async ()
       "http://localhost:4321"
     );
     assert.equal(
-      (await fetch(`${baseUrl}/api/config`, {
-        headers: { origin: "https://hostile.example" }
-      })).status,
+      (
+        await fetch(`${baseUrl}/api/config`, {
+          headers: { origin: "https://hostile.example" }
+        })
+      ).status,
       403
     );
   } finally {
@@ -308,8 +266,7 @@ test("anonymous production requests cannot read or mutate content", async () => 
       authenticated: false,
       authenticationRequired: true,
       provider: "github",
-      label: "Sign in",
-      startUrl: "/api/auth/github/start"
+      label: "Sign in"
     });
 
     assert.equal((await fetch(`${baseUrl}/api/config`)).status, 401);
@@ -333,9 +290,7 @@ test("anonymous production requests cannot read or mutate content", async () => 
 test("the production machine token can only read config and records", async () => {
   await withProductionServer(
     async ({ baseUrl, rootDir }) => {
-      const authorization = {
-        authorization: `Bearer ${READ_TOKEN}`
-      };
+      const authorization = { authorization: `Bearer ${READ_TOKEN}` };
       const readablePaths = [
         "/api/config",
         "/api/collections",
@@ -426,21 +381,19 @@ test("production CORS permits every origin without credential cookies", async ()
       headers: { origin: ADMIN_ORIGIN }
     });
     assert.equal(allowed.status, 200);
-    assert.equal(
-      allowed.headers.get("access-control-allow-origin"),
-      "*"
-    );
+    assert.equal(allowed.headers.get("access-control-allow-origin"), "*");
     assert.equal(allowed.headers.get("access-control-allow-credentials"), null);
 
-    const preflight = await fetch(`${baseUrl}/api/config`, {
+    const preflight = await fetch(`${baseUrl}/api/auth/github`, {
       method: "OPTIONS",
       headers: {
         origin: ADMIN_ORIGIN,
-        "access-control-request-method": "PUT",
-        "access-control-request-headers": "authorization,content-type"
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "content-type"
       }
     });
     assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
     assert.equal(
       preflight.headers.get("access-control-allow-headers"),
       "Authorization, Content-Type"
@@ -450,124 +403,38 @@ test("production CORS permits every origin without credential cookies", async ()
       headers: { origin: SECOND_ADMIN_ORIGIN }
     });
     assert.equal(secondOrigin.status, 200);
-    assert.equal(
-      secondOrigin.headers.get("access-control-allow-origin"),
-      "*"
-    );
+    assert.equal(secondOrigin.headers.get("access-control-allow-origin"), "*");
   });
 });
 
-test("OAuth accepts every valid browser origin and rejects malformed targets", async () => {
-  await withProductionServer(async ({ baseUrl }) => {
-    const authorizationUrl = await beginAuthentication(
-      baseUrl,
-      "second_origin_nonce_123456",
-      SECOND_ADMIN_ORIGIN
-    );
-    const callback = await completeCallback(
-      baseUrl,
-      authorizationUrl.searchParams.get("state")
-    );
-    assert.equal(callback.status, 200);
-    const callbackSource = await callback.text();
-    assert.match(callbackSource, /https:\/\/another-admin\.example:8443/);
+test("a verified GitHub token becomes an opaque service session", async () => {
+  await withProductionServer(async ({ baseUrl, clock, github }) => {
+    const authenticated = await authenticate(baseUrl);
+    assert.equal(authenticated.status, 200);
+    assert.equal(authenticated.headers.get("cache-control"), "no-store");
+    assert.equal(authenticated.headers.get("access-control-allow-origin"), "*");
+    const result = await authenticated.json();
 
-    for (const origin of [
-      "not-an-origin",
-      "https://admin.example/path",
-      "file:///tmp/admin.html"
-    ]) {
-      const start = new URL("/api/auth/github/start", baseUrl);
-      start.searchParams.set("origin", origin);
-      start.searchParams.set("nonce", "invalid_origin_nonce_1234");
-      const response = await fetch(start, {
-        redirect: "manual",
-        headers: { origin: SECOND_ADMIN_ORIGIN }
-      });
-      assert.equal(response.status, 400);
-    }
-  });
-});
-
-test("a valid OAuth state reports provider cancellation to its bound opener", async () => {
-  await withProductionServer(async ({ baseUrl, github }) => {
-    const nonce = "cancel_nonce_1234567890";
-    const authorizationUrl = await beginAuthentication(baseUrl, nonce);
-    const callback = new URL("/api/auth/github/callback", baseUrl);
-    callback.searchParams.set("state", authorizationUrl.searchParams.get("state"));
-    callback.searchParams.set("error", "access_denied");
-    const response = await fetch(callback);
-    assert.equal(response.status, 400);
-    const source = await response.text();
-    const payload = callbackPayload(source);
-    assert.deepEqual(payload, {
-      type: "minicms:api-auth",
-      nonce,
-      status: "error",
-      message: "GitHub authentication was not completed."
+    assert.equal(github.calls.length, 1);
+    assert.equal(github.calls[0].url, "https://api.github.com/user");
+    assert.ok(result.token);
+    assert.match(result.token, /^[a-zA-Z0-9_-]{32,256}$/);
+    assert.notEqual(result.token, GITHUB_ACCESS_TOKEN);
+    assert.deepEqual(result.session, {
+      authenticated: true,
+      authenticationRequired: true,
+      provider: "github",
+      label: "SignalWerk",
+      login: "SignalWerk",
+      avatarUrl: "https://avatars.example/signalwerk.png",
+      expiresAt: new Date(clock.value + SESSION_TTL_MS).toISOString()
     });
-    assert.match(source, /https:\/\/admin\.example/);
-    assert.equal(github.calls.length, 0);
-  });
-});
-
-test("signalwerk gets an origin-bound one-time bearer session", async () => {
-  await withProductionServer(async ({ baseUrl, github }) => {
-    const nonce = "client_nonce_1234567890";
-    const authorizationUrl = await beginAuthentication(baseUrl, nonce);
-    const state = authorizationUrl.searchParams.get("state");
-    const challenge = authorizationUrl.searchParams.get("code_challenge");
-
-    const callback = await completeCallback(baseUrl, state);
-    assert.equal(callback.status, 200);
-    assert.equal(callback.headers.get("cache-control"), "no-store");
-    assert.equal(callback.headers.get("x-content-type-options"), "nosniff");
-    assert.equal(callback.headers.get("referrer-policy"), "no-referrer");
-    assert.match(callback.headers.get("content-security-policy"), /script-src 'nonce-/);
-    const callbackSource = await callback.text();
-    const payload = callbackPayload(callbackSource);
-    assert.deepEqual(
-      {
-        type: payload.type,
-        status: payload.status,
-        nonce: payload.nonce
-      },
-      {
-        type: "minicms:api-auth",
-        status: "success",
-        nonce
-      }
-    );
-    assert.ok(payload.code);
-    assert.doesNotMatch(callbackSource, new RegExp(GITHUB_ACCESS_TOKEN));
-    assert.doesNotMatch(callbackSource, /github-client-secret/);
-
-    const tokenCall = github.calls.find((call) =>
-      call.url.endsWith("/login/oauth/access_token")
-    );
-    const tokenBody = new URLSearchParams(tokenCall.options.body);
-    const verifier = tokenBody.get("code_verifier");
-    assert.equal(
-      createHash("sha256").update(verifier).digest("base64url"),
-      challenge
+    assert.doesNotMatch(
+      JSON.stringify(result),
+      new RegExp(GITHUB_ACCESS_TOKEN)
     );
 
-    const replayedState = await completeCallback(baseUrl, state);
-    assert.equal(replayedState.status, 400);
-
-    const exchanged = await exchange(baseUrl, payload);
-    assert.equal(exchanged.status, 200);
-    const exchangeResult = await exchanged.json();
-    assert.ok(exchangeResult.token);
-    assert.notEqual(exchangeResult.token, GITHUB_ACCESS_TOKEN);
-    assert.equal(exchangeResult.session.login, "SignalWerk");
-    assert.equal(exchangeResult.session.authenticationRequired, true);
-    assert.doesNotMatch(JSON.stringify(exchangeResult), new RegExp(GITHUB_ACCESS_TOKEN));
-
-    const replayedCode = await exchange(baseUrl, payload);
-    assert.equal(replayedCode.status, 400);
-
-    const authorization = { authorization: `Bearer ${exchangeResult.token}` };
+    const authorization = { authorization: `Bearer ${result.token}` };
     const session = await fetch(`${baseUrl}/api/auth/session`, {
       headers: authorization
     });
@@ -576,69 +443,156 @@ test("signalwerk gets an origin-bound one-time bearer session", async () => {
     const config = await fetch(`${baseUrl}/api/config`, { headers: authorization });
     assert.equal(config.status, 200);
     assert.equal(config.headers.get("cache-control"), "private, no-store");
-
-    const logout = await fetch(`${baseUrl}/api/auth/logout`, {
-      method: "POST",
-      headers: authorization
-    });
-    assert.equal(logout.status, 204);
-    assert.equal(
-      (await fetch(`${baseUrl}/api/config`, { headers: authorization })).status,
-      401
-    );
+    assert.equal(github.calls.length, 1, "the GitHub token is not retained or reused");
   });
 });
 
-test("a different GitHub user is denied without an exchange code", async () => {
-  await withProductionServer(
-    async ({ baseUrl }) => {
-      const authorizationUrl = await beginAuthentication(
-        baseUrl,
-        "denied_nonce_1234567890"
-      );
-      const callback = await completeCallback(
-        baseUrl,
-        authorizationUrl.searchParams.get("state")
-      );
-      assert.equal(callback.status, 403);
-      const source = await callback.text();
-      const payload = callbackPayload(source);
-      assert.equal(payload.status, "error");
-      assert.equal(payload.code, undefined);
-      assert.doesNotMatch(source, new RegExp(GITHUB_ACCESS_TOKEN));
-      assert.doesNotMatch(source, /another-user/i);
-    },
-    { login: "another-user" }
-  );
+test("both the immutable GitHub ID and login are required", async () => {
+  for (const github of [
+    { id: 1234567, login: "signalwerk" },
+    { id: 992878, login: "another-user" }
+  ]) {
+    await withProductionServer(
+      async ({ baseUrl, github: client }) => {
+        const response = await authenticate(baseUrl);
+        assert.equal(response.status, 403);
+        const source = await response.text();
+        assert.doesNotMatch(source, new RegExp(GITHUB_ACCESS_TOKEN));
+        assert.doesNotMatch(source, /another-user/);
+        assert.equal(client.calls.length, 1);
+        const session = await fetch(`${baseUrl}/api/auth/session`).then(
+          (result) => result.json()
+        );
+        assert.equal(session.authenticated, false);
+      },
+      { github }
+    );
+  }
 });
 
-test("exchange codes and bearer sessions expire at their configured TTL", async () => {
+test("invalid GitHub-token requests are rejected before contacting GitHub", async () => {
+  await withProductionServer(async ({ baseUrl, github }) => {
+    const requests = [
+      fetch(`${baseUrl}/api/auth/github`, { method: "POST" }),
+      fetch(`${baseUrl}/api/auth/github`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}"
+      }),
+      fetch(`${baseUrl}/api/auth/github`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: "too-short" })
+      }),
+      fetch(`${baseUrl}/api/auth/github`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: GITHUB_ACCESS_TOKEN, extra: true })
+      }),
+      fetch(`${baseUrl}/api/auth/github`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{"
+      }),
+      fetch(`${baseUrl}/api/auth/github`, {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: JSON.stringify({ token: GITHUB_ACCESS_TOKEN })
+      })
+    ];
+    const responses = await Promise.all(requests);
+    for (const response of responses) {
+      assert.equal(response.status, 400);
+      assert.doesNotMatch(await response.text(), new RegExp(GITHUB_ACCESS_TOKEN));
+    }
+
+    const oversized = await fetch(`${baseUrl}/api/auth/github`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "x".repeat(9 * 1024) })
+    });
+    assert.equal(oversized.status, 413);
+    assert.doesNotMatch(await oversized.text(), /x{100}/);
+    assert.equal(github.calls.length, 0);
+  });
+});
+
+test("GitHub lookup failures never establish or echo a session", async () => {
+  const failures = [
+    [{ status: 401 }, 401],
+    [{ status: 403 }, 401],
+    [{ status: 500 }, 502],
+    [{ malformed: true }, 502],
+    [{ body: { id: "992878", login: "signalwerk" } }, 502],
+    [{ failure: new Error("network failure") }, 502]
+  ];
+
+  for (const [github, expectedStatus] of failures) {
+    await withProductionServer(
+      async ({ baseUrl, github: client }) => {
+        const response = await authenticate(baseUrl);
+        assert.equal(response.status, expectedStatus);
+        const source = await response.text();
+        assert.doesNotMatch(source, new RegExp(GITHUB_ACCESS_TOKEN));
+        assert.equal(client.calls.length, 1);
+        const session = await fetch(`${baseUrl}/api/auth/session`).then(
+          (result) => result.json()
+        );
+        assert.equal(session.authenticated, false);
+      },
+      { github }
+    );
+  }
+});
+
+test("the removed service-local OAuth routes have no handlers", async () => {
+  await withProductionServer(async ({ baseUrl, github }) => {
+    const requests = [
+      fetch(`${baseUrl}/api/auth/github/start`, { redirect: "manual" }),
+      fetch(`${baseUrl}/api/auth/github/callback?code=unused`),
+      fetch(`${baseUrl}/api/auth/exchange`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}"
+      })
+    ];
+    for (const response of await Promise.all(requests)) {
+      assert.equal([401, 404].includes(response.status), true);
+      assert.equal(response.headers.get("location"), null);
+    }
+    assert.equal(github.calls.length, 0);
+  });
+});
+
+test("opaque sessions expire and logout revokes them", async () => {
   const clock = { value: Date.parse("2026-08-02T12:00:00Z") };
   await withProductionServer(
     async ({ baseUrl }) => {
-      const first = await beginAuthentication(baseUrl, "expiry_nonce_1234567890");
-      const firstCallback = await completeCallback(
-        baseUrl,
-        first.searchParams.get("state")
+      const first = await authenticate(baseUrl).then((response) => response.json());
+      const firstAuthorization = {
+        authorization: `Bearer ${first.token}`
+      };
+      const logout = await fetch(`${baseUrl}/api/auth/logout`, {
+        method: "POST",
+        headers: firstAuthorization
+      });
+      assert.equal(logout.status, 204);
+      assert.equal(
+        (
+          await fetch(`${baseUrl}/api/config`, {
+            headers: firstAuthorization
+          })
+        ).status,
+        401
       );
-      const firstPayload = callbackPayload(await firstCallback.text());
-      clock.value += EXCHANGE_CODE_TTL_MS + 1;
-      assert.equal((await exchange(baseUrl, firstPayload)).status, 400);
 
-      const second = await beginAuthentication(baseUrl, "session_nonce_123456789");
-      const secondCallback = await completeCallback(
-        baseUrl,
-        second.searchParams.get("state")
-      );
-      const secondPayload = callbackPayload(await secondCallback.text());
-      const exchanged = await exchange(baseUrl, secondPayload);
-      assert.equal(exchanged.status, 200);
-      const { token } = await exchanged.json();
+      const second = await authenticate(baseUrl).then((response) => response.json());
+      assert.notEqual(second.token, first.token);
       clock.value += SESSION_TTL_MS + 1;
       assert.equal(
         (
           await fetch(`${baseUrl}/api/config`, {
-            headers: { authorization: `Bearer ${token}` }
+            headers: { authorization: `Bearer ${second.token}` }
           })
         ).status,
         401

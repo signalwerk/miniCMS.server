@@ -44,35 +44,6 @@ function parsePort(value = "8787") {
   return port;
 }
 
-function parseOrigin(value, name, { httpsOnly = false } = {}) {
-  if (value.includes("*")) {
-    throw configurationError(`${name} must not contain a wildcard.`);
-  }
-  let url;
-  try {
-    url = new URL(value);
-  } catch {
-    throw configurationError(`${name} must be a valid absolute origin.`);
-  }
-  if (!["http:", "https:"].includes(url.protocol)) {
-    throw configurationError(`${name} must use HTTP or HTTPS.`);
-  }
-  if (httpsOnly && url.protocol !== "https:") {
-    throw configurationError(`${name} must use HTTPS.`);
-  }
-  if (
-    url.username ||
-    url.password ||
-    url.pathname !== "/" ||
-    url.search ||
-    url.hash ||
-    url.origin !== value
-  ) {
-    throw configurationError(`${name} must be an exact origin without a path.`);
-  }
-  return url.origin;
-}
-
 function commonConfiguration(environment, projectRoot) {
   return {
     rootDir: path.resolve(
@@ -101,19 +72,6 @@ function productionConfiguration({
   projectRoot
 } = {}) {
   const configuration = commonConfiguration(environment, projectRoot);
-  const publicUrl = parseOrigin(
-    requiredEnvironmentValue(environment, "MINICMS_PUBLIC_URL"),
-    "MINICMS_PUBLIC_URL",
-    { httpsOnly: true }
-  );
-  const githubClientId = requiredEnvironmentValue(
-    environment,
-    "MINICMS_GITHUB_CLIENT_ID"
-  );
-  const githubClientSecret = requiredEnvironmentValue(
-    environment,
-    "MINICMS_GITHUB_CLIENT_SECRET"
-  );
   const sessionSecret = requiredEnvironmentValue(
     environment,
     "MINICMS_SESSION_SECRET"
@@ -126,9 +84,6 @@ function productionConfiguration({
 
   return Object.freeze({
     ...configuration,
-    publicUrl,
-    githubClientId,
-    githubClientSecret,
     sessionSecret,
     readToken: optionalReadToken(environment)
   });
@@ -156,7 +111,6 @@ function readProjectRootOption(arguments_) {
 
 export {
   developmentConfiguration,
-  parseOrigin,
   productionConfiguration,
   readProjectRootOption
 };

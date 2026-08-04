@@ -119,7 +119,7 @@ ordinary `/media/<collection>/<sha256>/<filename>` route resolves only regular,
 non-symlink files inside the configured media folder and always revalidates.
 It supports byte ranges; non-image files
 are served as attachments with a restrictive CSP so uploaded documents cannot
-become active content on the OAuth/API origin.
+become active content on the API origin.
 
 Before any raw, metadata, SVG, cached, or generated response is returned, the
 service hashes the selected source and requires it to match the SHA-256 route
@@ -184,12 +184,9 @@ the hash, and huge originals are never buffered into the Node.js heap.
 ## Production
 
 `npm start` always enables authentication and fails before listening unless
-every security setting is valid:
+the session secret and runtime settings are valid:
 
 ```sh
-MINICMS_PUBLIC_URL=https://media.signalwerk.ch \
-MINICMS_GITHUB_CLIENT_ID=replace-me \
-MINICMS_GITHUB_CLIENT_SECRET=replace-me \
 MINICMS_SESSION_SECRET=replace-with-at-least-32-random-characters \
 HOST=0.0.0.0 \
 npm start -- --project-root /srv/content-project
@@ -205,15 +202,11 @@ The repository includes a production image and a Coolify-compatible
 `docker-compose.yml`. Configure these secrets in Coolify:
 
 ```text
-MINICMS_GITHUB_CLIENT_ID=replace-me
-MINICMS_GITHUB_CLIENT_SECRET=replace-me
 MINICMS_SESSION_SECRET=replace-with-at-least-32-random-characters
 MINICMS_READ_TOKEN=optional-read-only-deployment-token
 ```
 
 Then deploy the Compose service and assign its domain to container port `8787`.
-The included Compose file fixes the service origin to
-`https://media.signalwerk.ch`.
 The service is exposed only to Coolify's proxy; Compose deliberately does not
 publish a host port. It runs as UID/GID `1000:1000`, so prepare the durable host
 directory with matching write access. The mounted directory must directly
@@ -231,16 +224,17 @@ Compose mounts that directory at `/data` and keeps the image cache below
 configuration. Use exactly one running replica for this writable volume;
 overlapping rolling replacements are not safe.
 
-Run one service replica per writable project root. OAuth state, bearer
-sessions, write coordination, and in-flight image work are process-local. Put
-a CDN or reverse proxy with request rate limits in front of the intentionally
-public raw `/media/*` and derivative `/:schema/media/*` routes; per-instance
-Sharp concurrency and queue limits remain the final resource boundary.
+Run one service replica per writable project root. Bearer sessions, write
+coordination, and in-flight image work are process-local. Put a CDN or reverse
+proxy with request rate limits in front of the intentionally public raw
+`/media/*` and derivative `/:schema/media/*` routes; per-instance Sharp
+concurrency and queue limits remain the final resource boundary. Rate-limit
+`POST /api/auth/github` as well so it cannot be used as an unbounded GitHub
+`/user` proxy.
 
-- `MINICMS_PUBLIC_URL` is the service's exact HTTPS origin, without a path or
-  trailing slash.
-- The only accepted GitHub login is hard-coded as `signalwerk`; it cannot be
-  widened through an environment variable or project configuration.
+- The only accepted GitHub identity is hard-coded as numeric user ID `992878`
+  with the case-insensitive login `signalwerk`; neither value can be widened
+  through an environment variable or project configuration.
 - `MINICMS_SESSION_SECRET` must contain at least 32 characters and should be a
   high-entropy deployment secret.
 - `MINICMS_READ_TOKEN` is optional. When configured, it must contain at least
@@ -249,33 +243,43 @@ Sharp concurrency and queue limits remain the final resource boundary.
   trusted static-build environment; never store it in `cms.config.yml` or
   browser code.
 
-Configure the GitHub OAuth application's callback URL as
-`<MINICMS_PUBLIC_URL>/api/auth/github/callback`. The flow requests no optional
-GitHub scopes; the authenticated `/user` identity is sufficient.
+Authentication needs no other service environment variables. `HOST`, `PORT`,
+`MINICMS_PROJECT_ROOT`, and the image/upload limits remain ordinary runtime
+settings.
 
-The service uses GitHub's authorization-code flow with server-held OAuth
-state and PKCE S256. It exchanges the code and loads `/user` server-side, then
-allows only `signalwerk`. A GitHub access token is never returned to
-the browser. The callback sends an origin- and nonce-bound, one-time exchange
-code to the opener. That code lasts 60 seconds and can be exchanged once for a
-random opaque bearer session lasting eight hours. Only keyed hashes of OAuth
-state, exchange codes, and bearer tokens are kept in memory. Restarting the
-service logs out existing sessions.
+This service does not own or require a GitHub OAuth app, public callback URL,
+client ID, or client secret. The browser authenticates with the shared central
+GitHub auth worker and sends the resulting token exactly once to:
+
+```http
+POST /api/auth/github
+Content-Type: application/json
+
+{"token":"<github-token>"}
+```
+
+The service immediately calls GitHub `/user` with that token and requires both
+user ID `992878` and login `signalwerk`. It never logs, persists, caches,
+returns, or reuses the GitHub token. A successful response contains a new
+opaque miniCMS bearer and its session metadata. That bearer lasts eight hours,
+is stored only as a keyed hash in process memory, and is revoked by logout.
+Restarting the service logs out existing sessions.
 
 Production CORS allows every origin with `Access-Control-Allow-Origin: *`,
 permits the `Authorization` and `Content-Type` headers, and never enables
-credential cookies. OAuth accepts any canonical HTTP(S) browser origin, but
-the callback and one-time exchange remain bound to that exact requesting
-origin and nonce. Browser content reads and every mutation require an opaque
-GitHub-authenticated bearer before large body parsers run. An optional machine
-read token can access only `GET`/`HEAD` config, collection-list, and record
-routes; the same token receives `403` for configuration writes, record
-mutations, renames, and uploads. `/api/health`, `/api/ready`, and the
-authentication bootstrap routes are public. Health reports that the process
-is alive; readiness also validates the project and image configuration.
+credential cookies. The central worker, not this API, restricts which browser
+origins can receive the GitHub token. `POST /api/auth/github` is public so the
+browser can exchange that token, but it succeeds only after the service's own
+GitHub identity check. Browser content reads and every mutation require the
+resulting opaque bearer before large body parsers run. An optional machine read
+token can access only `GET`/`HEAD` config, collection-list, and record routes;
+the same token receives `403` for configuration writes, record mutations,
+renames, and uploads. `/api/health`, `/api/ready`, `/api/auth/session`, and
+`POST /api/auth/github` are public. Health reports that the process is alive;
+readiness also validates the project and image configuration.
 The raw `/media/*` and derivative `/<schema>/media/*` routes are intentionally
 public: these assets are website-public content, and ordinary image elements
-cannot attach an OAuth bearer header.
+cannot attach the opaque service bearer.
 
 ## API
 
@@ -284,9 +288,7 @@ Public routes:
 - `GET /api/health`
 - `GET /api/ready`
 - `GET /api/auth/session`
-- `GET /api/auth/github/start?origin=<origin>&nonce=<nonce>`
-- `GET /api/auth/github/callback`
-- `POST /api/auth/exchange`
+- `POST /api/auth/github`
 - `GET` and `HEAD`
   `/<schema>/media/<collection>/<sha256>/<canonical-operations>/<output-name>.<format>`
 - `GET` and `HEAD /media/<collection>/<sha256>/<filename>` for originals/downloads

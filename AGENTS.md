@@ -13,9 +13,10 @@ same change unless backward compatibility is explicitly requested.
 
 - `src/app.mjs` owns the existing config, complete-record YAML, collection,
   upload, rename, delete, and public-media HTTP behavior.
-- `src/auth.mjs` owns wildcard production CORS, GitHub OAuth with PKCE,
-  one-time origin-bound code exchange, in-memory bearer sessions, the optional
-  fixed machine-read bearer, and authorization middleware.
+- `src/auth.mjs` owns wildcard production CORS, the one-request GitHub-token
+  identity exchange, in-memory opaque bearer sessions, the optional fixed
+  machine-read bearer, and authorization middleware. The central auth worker,
+  not this service, owns GitHub OAuth.
 - `src/config.mjs` is the fail-closed environment and command configuration
   boundary.
 - `src/image/` owns the public Sharp derivative service: `config.mjs` reads
@@ -47,15 +48,18 @@ same change unless backward compatibility is explicitly requested.
 - `dev` must refuse non-loopback hosts. `start` must never provide an
   unauthenticated fallback and must validate every required setting before
   listening.
-- Only the hard-coded GitHub login `signalwerk` may authenticate. Never trust
-  an allowed login, provider, or OAuth endpoint from environment variables or
-  consumer YAML.
-- GitHub tokens and the GitHub client secret never cross to the browser, logs,
-  callback HTML, exchange responses, or persisted files.
-- OAuth state is unpredictable and single-use. Exchange codes are bound to the
-  validated admin origin and client nonce, expire after 60 seconds, and are
-  single-use. Bearers expire after eight hours and logout revokes them.
-- Store only keyed hashes of state, exchange codes, and bearer tokens.
+- Only GitHub user ID `992878` with the case-insensitive login `signalwerk` may
+  authenticate. Pin both in code; never trust an allowed identity or provider
+  from environment variables, browser input, or consumer YAML.
+- This service has no GitHub OAuth app, client credentials, callback, PKCE,
+  state, or browser-origin exchange. The trusted browser obtains a GitHub token
+  from the central auth worker and submits it once as the sole JSON value to
+  `POST /api/auth/github`.
+- Use the submitted GitHub token only for the immediate server-side `/user`
+  lookup. Never log, persist, return, cache, or reuse it. Verify both the pinned
+  numeric ID and login before issuing an opaque service bearer.
+- Bearers expire after eight hours and logout revokes them. Store only keyed
+  hashes of session and machine-read bearers; never persist sessions.
 - `MINICMS_READ_TOKEN` is an optional production-only machine credential with
   at least 32 non-whitespace characters. Compare only keyed fixed-length
   digests. It authorizes exactly GET/HEAD config, collection-list, and record
@@ -103,7 +107,7 @@ same change unless backward compatibility is explicitly requested.
   extension in the URL and mirrored cache filename.
 - Raw reusable `/media/<collection>/<sha256>/<filename>` files always revalidate
   and support byte ranges;
-  non-image files are attachments on the API/auth origin. Only schema-based
+  non-image files are attachments on the API origin. Only schema-based
   derivatives below
   `/<schema>/media/<collection>/<sha256>/<canonical-operations>/<output-name>.<format>`
   use the service's fixed one-year immutable policy. The requested schema must
@@ -121,9 +125,9 @@ same change unless backward compatibility is explicitly requested.
   traffic. Collections containing both `connector` and `remote_collection`
   are imported client-side aliases: omit them from the local collection index,
   reject their CRUD/upload routes, and skip them during local folder checks.
-- The service is single-replica per writable project root: OAuth state,
-  sessions, write coordination, and image work are process-local. A CDN or
-  reverse proxy owns public-route request rate limiting.
+- The service is single-replica per writable project root: bearer sessions,
+  write coordination, and image work are process-local. A CDN or reverse proxy
+  owns public-route request rate limiting, including `POST /api/auth/github`.
 - `MINICMS_MEDIA_MAX_UPLOAD_BYTES` bounds all authenticated media uploads;
   image-specific environment settings bound only Sharp and derivative-cache
   work.
@@ -140,9 +144,9 @@ same change unless backward compatibility is explicitly requested.
   never credential cookies. Every mutation and ordinary browser content read
   requires an opaque bearer issued only after `signalwerk` authenticates; the
   separately configured machine token grants only the narrow read routes above.
-  OAuth start accepts any canonical HTTP(S) browser origin, while callback
-  delivery and one-time code exchange remain bound to that exact origin and
-  client nonce. Authentication responses retain no-store, nosniff, CSP, and
+  The public `POST /api/auth/github` route accepts a central-worker GitHub token
+  only long enough to verify `/user`; the worker owns its client-origin
+  allowlist. Authentication responses retain no-store, nosniff, CSP, and
   no-referrer protections.
 - Unauthenticated development accepts browser API requests only from loopback
   origins; origin-less CLI requests remain valid.
