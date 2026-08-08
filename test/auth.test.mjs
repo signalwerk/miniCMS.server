@@ -396,8 +396,9 @@ test("production CORS permits every origin without credential cookies", async ()
     assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
     assert.equal(
       preflight.headers.get("access-control-allow-headers"),
-      "Authorization, Content-Type"
+      "Authorization, Content-Type, If-Match"
     );
+    assert.equal(preflight.headers.get("access-control-expose-headers"), "ETag");
 
     const secondOrigin = await fetch(`${baseUrl}/api/health`, {
       headers: { origin: SECOND_ADMIN_ORIGIN }

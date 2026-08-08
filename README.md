@@ -266,8 +266,9 @@ is stored only as a keyed hash in process memory, and is revoked by logout.
 Restarting the service logs out existing sessions.
 
 Production CORS allows every origin with `Access-Control-Allow-Origin: *`,
-permits the `Authorization` and `Content-Type` headers, and never enables
-credential cookies. The central worker, not this API, restricts which browser
+permits the `Authorization`, `Content-Type`, and `If-Match` headers, exposes
+`ETag`, and never enables credential cookies. The central worker, not this API,
+restricts which browser
 origins can receive the GitHub token. `POST /api/auth/github` is public so the
 browser can exchange that token, but it succeeds only after the service's own
 GitHub identity check. Browser content reads and every mutation require the
@@ -302,6 +303,34 @@ Authenticated production routes:
 - `GET`, `PUT`, and `DELETE /api/collections/:collection/:record`
 - `POST /api/collections/:collection/:record/rename`
 - `POST /api/media/:collection?filename=<name>`
+
+Configuration writes use optimistic concurrency while keeping the raw complete
+configuration as their body:
+
+```http
+GET /api/config
+ETag: "<sha256-of-exact-config-bytes>"
+
+PUT /api/config
+Content-Type: application/json
+If-Match: "<etag-from-get>"
+
+{ "connectors": {}, "site": {}, "node_types": {}, "collections": {} }
+```
+
+Missing and stale preconditions return `428` and `412`. When the folder of a
+same-key local collection changes, that PUT copies its existing folder to the
+absent destination, atomically commits `cms.config.yml`, and then removes only
+the old folder. An interrupted transaction is recovered from the service-owned
+`.minicms-config-transactions` journal before content is served. Remote aliases
+never touch local folders. A newly configured local collection whose folder
+does not yet exist lists as empty; the first record write creates the folder.
+The journal recovers interrupted service processes; it does not claim
+fsync-backed durability across a host or storage power failure.
+The service must be the only runtime writer of the mounted configuration and
+collection folders. Stop it before synchronizing or editing that durable root
+from the host; external concurrent writes cannot participate in its
+process-local transaction gate.
 
 When `MINICMS_READ_TOKEN` is configured, that bearer additionally permits only:
 

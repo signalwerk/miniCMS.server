@@ -32,6 +32,8 @@ import {
   normalizeUploadFilename,
   streamMediaUpload
 } from "./upload.mjs";
+import { createConfigTransaction } from "./config-transaction.mjs";
+import { createProjectGate, withProjectGate } from "./project-gate.mjs";
 
 const IMAGE_EXTENSION_FORMATS = new Map([
   [".avif", "avif"],
@@ -173,8 +175,22 @@ export function createApp({
 
   let cachedConfig = null;
   let cachedConfigMtime = 0;
+  const projectGate = createProjectGate();
+  const projectRead = (handler) =>
+    withProjectGate(projectGate, "read", handler);
+  const projectWrite = (handler) =>
+    withProjectGate(projectGate, "write", handler);
+  const configTransaction = createConfigTransaction({ rootDir, configFile });
+  let transactionRecovery = null;
+
+  function ensureTransactionRecovery() {
+    transactionRecovery ??= configTransaction.recover();
+    return transactionRecovery;
+  }
 
   async function getConfig() {
+    await ensureTransactionRecovery();
+    configTransaction.check();
     let stat;
     try {
       stat = await fs.stat(configFile);
@@ -226,10 +242,9 @@ export function createApp({
     }
     const collection = { name, ...configuredCollection };
 
-    const folder = path.resolve(rootDir, collection.folder);
-    if (!isInside(contentRoot, folder)) {
-      throw httpError(500, `Collection "${name}" must use a folder inside content/.`);
-    }
+    const folder = await configTransaction.resolveCollectionDirectory(
+      collection.folder
+    );
     return { config, collection, folder };
   }
 
@@ -272,90 +287,98 @@ export function createApp({
 
   // Authentication is deliberately resolved before potentially large request
   // bodies are parsed. The public GitHub-token bootstrap owns its small parser.
-  app.post("/api/media/:collectionName", async (request, response, next) => {
-    try {
-      const { config, collection } = await getCollection(
-        request.params.collectionName
-      );
-      const {
-        filename: originalName,
-        base,
-        extension
-      } = normalizeUploadFilename(request.query.filename);
-      const acceptedTypes = configuredCollectionMediaAccept(
-        config,
-        collection
-      );
-      const uploadedFile = {
-        filename: originalName,
-        mimeType: request.headers["content-type"]
-      };
-      if (
-        !acceptedTypes.length ||
-        !mediaFileMatchesAccept(uploadedFile, acceptedTypes)
-      ) {
-        throw httpError(
-          400,
-          mediaAcceptErrorMessage(uploadedFile, acceptedTypes)
+  app.post(
+    "/api/media/:collectionName",
+    projectRead(
+    async (request, response, next) => {
+      try {
+        const { config, collection } = await getCollection(
+          request.params.collectionName
         );
-      }
-      const { trustedMediaRoot } = await imageService.uploadDirectory(config);
-      await cleanUploadDirectoryOnce(trustedMediaRoot);
-      const acceptedImageTypes = configuredCollectionMediaAccept(
-        config,
-        collection,
-        "image"
-      );
-      const validateTemporary = mediaFileMatchesAccept(
-        uploadedFile,
-        acceptedImageTypes
-      )
-        ? ({ temporaryPath }) =>
-            validateUploadedImage(
-              temporaryPath,
-              originalName,
-              acceptedImageTypes
-            )
-        : undefined;
-      const { filename, sha } = await streamMediaUpload({
-        request,
-        directory: trustedMediaRoot,
-        collection: collection.name,
-        base,
-        extension,
-        maxBytes: maxUploadBytes,
-        validateTemporary
-      });
+        const {
+          filename: originalName,
+          base,
+          extension
+        } = normalizeUploadFilename(request.query.filename);
+        const acceptedTypes = configuredCollectionMediaAccept(
+          config,
+          collection
+        );
+        const uploadedFile = {
+          filename: originalName,
+          mimeType: request.headers["content-type"]
+        };
+        if (
+          !acceptedTypes.length ||
+          !mediaFileMatchesAccept(uploadedFile, acceptedTypes)
+        ) {
+          throw httpError(
+            400,
+            mediaAcceptErrorMessage(uploadedFile, acceptedTypes)
+          );
+        }
+        const { trustedMediaRoot } = await imageService.uploadDirectory(config);
+        await cleanUploadDirectoryOnce(trustedMediaRoot);
+        const acceptedImageTypes = configuredCollectionMediaAccept(
+          config,
+          collection,
+          "image"
+        );
+        const validateTemporary = mediaFileMatchesAccept(
+          uploadedFile,
+          acceptedImageTypes
+        )
+          ? ({ temporaryPath }) =>
+              validateUploadedImage(
+                temporaryPath,
+                originalName,
+                acceptedImageTypes
+              )
+          : undefined;
+        const { filename, sha } = await streamMediaUpload({
+          request,
+          directory: trustedMediaRoot,
+          collection: collection.name,
+          base,
+          extension,
+          maxBytes: maxUploadBytes,
+          validateTemporary
+        });
 
-      const publicFolder = String(
-        config.site?.public_folder || "/media"
-      ).replace(/\/$/, "");
-      response.status(201).json({
-        filename,
-        sha,
-        path: `${publicFolder}/${collection.name}/${sha}/${filename}`,
-        storage_path: `${String(
-          config.site?.media_folder || "content/media"
-        ).replace(/\/$/, "")}/${collection.name}/${sha}/${filename}`
-      });
-    } catch (error) {
-      next(error);
-    }
-  });
+        const publicFolder = String(
+          config.site?.public_folder || "/media"
+        ).replace(/\/$/, "");
+        response.status(201).json({
+          filename,
+          sha,
+          path: `${publicFolder}/${collection.name}/${sha}/${filename}`,
+          storage_path: `${String(
+            config.site?.media_folder || "content/media"
+          ).replace(/\/$/, "")}/${collection.name}/${sha}/${filename}`
+        });
+      } catch (error) {
+        next(error);
+      }
+    })
+  );
 
   app.use("/api", express.json({ limit: "10mb" }));
 
-  app.get("/api/config", async (_request, response, next) => {
+  app.get("/api/config", projectRead(async (_request, response, next) => {
     try {
-      response.json(await getConfig());
+      await ensureTransactionRecovery();
+      const { config, etag } = await configTransaction.snapshot();
+      response.set("etag", etag);
+      response.json(config);
     } catch (error) {
       next(error);
     }
-  });
+  }));
 
-  app.put("/api/config", async (request, response, next) => {
+  app.put("/api/config", projectWrite(async (request, response, next) => {
     try {
       const config = validateSharedConfig(request.body, 400);
+      await ensureTransactionRecovery();
       imageService.validateProjectConfiguration(config, 400);
       const mediaFolder = path.resolve(
         rootDir,
@@ -387,17 +410,21 @@ export function createApp({
           );
         }
       }
-      await writeYamlAtomic(configFile, config);
+      const etag = await configTransaction.save(
+        config,
+        request.headers["if-match"]
+      );
       const stat = await fs.stat(configFile);
       cachedConfig = config;
       cachedConfigMtime = stat.mtimeMs;
+      response.set("etag", etag);
       response.json({ saved: true, config });
     } catch (error) {
       next(error);
     }
-  });
+  }));
 
-  app.get("/api/collections", async (_request, response, next) => {
+  app.get("/api/collections", projectRead(async (_request, response, next) => {
     try {
       const config = await getConfig();
       response.json({
@@ -438,9 +465,9 @@ export function createApp({
     } catch (error) {
       next(error);
     }
-  });
+  }));
 
-  app.get("/api/collections/:collectionName", async (request, response, next) => {
+  app.get("/api/collections/:collectionName", projectRead(async (request, response, next) => {
     try {
       const { collection, folder } = await getCollection(request.params.collectionName);
       let entries;
@@ -467,11 +494,11 @@ export function createApp({
     } catch (error) {
       next(error);
     }
-  });
+  }));
 
   app.get(
     "/api/collections/:collectionName/:recordId",
-    async (request, response, next) => {
+    projectRead(async (request, response, next) => {
       try {
         const { collection, folder } = await getCollection(
           request.params.collectionName
@@ -485,12 +512,12 @@ export function createApp({
           next(error);
         }
       }
-    }
+    })
   );
 
   app.put(
     "/api/collections/:collectionName/:recordId",
-    async (request, response, next) => {
+    projectRead(async (request, response, next) => {
       try {
         const { config, collection, folder } = await getCollection(
           request.params.collectionName
@@ -506,12 +533,12 @@ export function createApp({
       } catch (error) {
         next(error);
       }
-    }
+    })
   );
 
   app.post(
     "/api/collections/:collectionName/:recordId/rename",
-    async (request, response, next) => {
+    projectRead(async (request, response, next) => {
       try {
         const { config, collection, folder } = await getCollection(
           request.params.collectionName
@@ -585,12 +612,12 @@ export function createApp({
       } catch (error) {
         next(error);
       }
-    }
+    })
   );
 
   app.delete(
     "/api/collections/:collectionName/:recordId",
-    async (request, response, next) => {
+    projectRead(async (request, response, next) => {
       try {
         const { config, collection, folder } = await getCollection(
           request.params.collectionName
@@ -660,10 +687,10 @@ export function createApp({
       } catch (error) {
         next(error);
       }
-    }
+    })
   );
 
-  app.post("/api/collections/:collectionName", async (request, response, next) => {
+  app.post("/api/collections/:collectionName", projectRead(async (request, response, next) => {
     try {
       const { config, collection, folder } = await getCollection(request.params.collectionName);
       validateSharedRecord(request.body, collection, config);
@@ -683,7 +710,7 @@ export function createApp({
     } catch (error) {
       next(error);
     }
-  });
+  }));
 
   app.use((error, _request, response, _next) => {
     const status = error.status || (error instanceof SyntaxError ? 400 : 500);

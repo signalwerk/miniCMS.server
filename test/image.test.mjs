@@ -258,6 +258,18 @@ async function withServer(run, options = {}) {
   }
 }
 
+async function putConfig(baseUrl, config) {
+  const current = await fetch(`${baseUrl}/api/config`);
+  return fetch(`${baseUrl}/api/config`, {
+    method: "PUT",
+    headers: {
+      "content-type": "application/json",
+      "if-match": current.headers.get("etag")
+    },
+    body: JSON.stringify(config)
+  });
+}
+
 function servicePath(source, config, options = {}) {
   return imageServicePath(source, { config, ...options });
 }
@@ -810,11 +822,7 @@ test("schema changes reject old URLs and publish only the new namespace", async 
     nextConfig.site.image_processing.width = 32;
     nextConfig.site.image_processing.height = 32;
     nextConfig.site.image_processing.cache.schema = "images_v2";
-    const saved = await fetch(`${baseUrl}/api/config`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(nextConfig)
-    });
+    const saved = await putConfig(baseUrl, nextConfig);
     assert.equal(saved.status, 200);
     const savedConfig = (await saved.json()).config;
 
@@ -932,11 +940,7 @@ test("strictly rejects noncanonical routes, invalid operations, and oversized ou
     const invalidProjectConfig = structuredClone(config);
     invalidProjectConfig.site.image_processing.width = 512;
     invalidProjectConfig.site.image_processing.height = 512;
-    const invalidProject = await fetch(`${baseUrl}/api/config`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(invalidProjectConfig)
-    });
+    const invalidProject = await putConfig(baseUrl, invalidProjectConfig);
     assert.equal(invalidProject.status, 400);
 
     const transformedInfo = valid.replace(/photo\.webp$/, "photo.json");

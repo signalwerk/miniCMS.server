@@ -19,6 +19,12 @@ same change unless backward compatibility is explicitly requested.
   not this service, owns GitHub OAuth.
 - `src/config.mjs` is the fail-closed environment and command configuration
   boundary.
+- `src/config-transaction.mjs` owns strong config revisions and copy-first,
+  journaled local collection-folder moves. `src/project-gate.mjs` prevents
+  config transactions from interleaving with authenticated collection reads,
+  CRUD, and uploads. Gate ownership follows the async route operation, not the
+  response socket lifetime; a disconnected request must retain its lock until
+  its filesystem work ends.
 - `src/image/` owns the public Sharp derivative service: `config.mjs` reads
   bounded operational settings, `url.mjs` adapts the shared canonical
   contract, `service.mjs` owns safe source resolution/processing/cache, and
@@ -121,6 +127,28 @@ same change unless backward compatibility is explicitly requested.
   routes under `/api` remain authenticated by HTTP method and route shape.
 - Production project roots must use durable writable storage. The service does
   not synchronize filesystem edits back to GitHub.
+- `GET /api/config` exposes a strong ETag over the exact source bytes;
+  `PUT /api/config` keeps the raw complete-config body and requires that ETag
+  in `If-Match`. Missing and stale preconditions return 428 and 412. CORS must
+  allow `If-Match` and expose `ETag`. The returned config and ETag must come
+  from one exact source snapshot so an external replacement cannot pair a
+  stale body with a newer revision.
+- A same-key local collection `folder` change is one config transaction.
+  Collection folders must be distinct, non-nested strict descendants of
+  `content/`, must not overlap `site.media_folder`, and may not traverse
+  symlink/non-directory components. Validate every next folder on config save
+  and every configured folder again before runtime CRUD, including collections
+  that did not move. The destination must be absent. Remote aliases never
+  participate, swaps/chains are rejected, and a missing source represents an
+  empty collection without creating a placeholder directory.
+- Folder moves copy regular directories and files into the exact service-owned
+  `.minicms-config-transactions` namespace, publish complete copies to absent
+  destinations, atomically replace config as the commit point, and only then
+  remove exact old source directories. Never prune parent directories. The
+  journal recovers old-config state by removing copies and new-config state by
+  removing old sources; an unknown config hash fails readiness closed. This is
+  process-crash recovery; the service does not claim fsync-backed host
+  power-loss durability.
 - Each service owns exactly one project root and never proxies connector
   traffic. Collections containing both `connector` and `remote_collection`
   are imported client-side aliases: omit them from the local collection index,
@@ -128,6 +156,10 @@ same change unless backward compatibility is explicitly requested.
 - The service is single-replica per writable project root: bearer sessions,
   write coordination, and image work are process-local. A CDN or reverse proxy
   owns public-route request rate limiting, including `POST /api/auth/github`.
+  The service is also the exclusive runtime writer of `cms.config.yml` and
+  collection folders. Deployment may prepare or synchronize the durable root
+  only while the service is stopped; concurrent host-side writes bypass its
+  process-local gate and optimistic transaction boundary.
 - `MINICMS_MEDIA_MAX_UPLOAD_BYTES` bounds all authenticated media uploads;
   image-specific environment settings bound only Sharp and derivative-cache
   work.
@@ -141,9 +173,10 @@ same change unless backward compatibility is explicitly requested.
   `delete_files_with_record`. On first upload, remove only strictly named stale
   upload temporaries left by an interrupted prior single-replica process.
 - Production API CORS deliberately uses `Access-Control-Allow-Origin: *` and
-  never credential cookies. Every mutation and ordinary browser content read
-  requires an opaque bearer issued only after `signalwerk` authenticates; the
-  separately configured machine token grants only the narrow read routes above.
+  never credential cookies. It permits `If-Match` and exposes `ETag`. Every
+  mutation and ordinary browser content read requires an opaque bearer issued
+  only after `signalwerk` authenticates; the separately configured machine
+  token grants only the narrow read routes above.
   The public `POST /api/auth/github` route accepts a central-worker GitHub token
   only long enough to verify `/user`; the worker owns its client-origin
   allowlist. Authentication responses retain no-store, nosniff, CSP, and

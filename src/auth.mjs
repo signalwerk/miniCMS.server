@@ -70,12 +70,13 @@ function developmentCors(request, response, next) {
   if (origin) {
     response.set({
       "access-control-allow-origin": origin,
+      "access-control-expose-headers": "ETag",
       vary: "Origin"
     });
   }
   if (request.method === "OPTIONS") {
     response.set({
-      "access-control-allow-headers": "Authorization, Content-Type",
+      "access-control-allow-headers": "Authorization, Content-Type, If-Match",
       "access-control-allow-methods": "DELETE, GET, HEAD, OPTIONS, POST, PUT"
     });
     response.status(204).end();
@@ -165,7 +166,8 @@ function createProductionAuthentication(
     }
     response.set({
       "access-control-allow-origin": "*",
-      "access-control-allow-headers": "Authorization, Content-Type",
+      "access-control-allow-headers": "Authorization, Content-Type, If-Match",
+      "access-control-expose-headers": "ETag",
       "access-control-allow-methods":
         "DELETE, GET, HEAD, OPTIONS, POST, PUT",
       "access-control-max-age": "600"
