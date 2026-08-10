@@ -3,6 +3,7 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import {
   configuredCollectionMediaAccept,
+  imageAssetMediaPath,
   mediaAcceptErrorMessage,
   mediaFileMatchesAccept,
   recordMediaStoragePaths
@@ -30,9 +31,11 @@ import {
   cleanUploadTemporaries,
   mediaUploadLimit,
   normalizeUploadFilename,
+  streamGithubMediaUpload,
   streamMediaUpload
 } from "./upload.mjs";
 import { createConfigTransaction } from "./config-transaction.mjs";
+import { mediaStorageMode } from "./media-contract.mjs";
 import { createProjectGate, withProjectGate } from "./project-gate.mjs";
 
 const IMAGE_EXTENSION_FORMATS = new Map([
@@ -138,8 +141,8 @@ async function pruneEmptyContentAddressedDirectories(sources) {
   for (const source of sources) {
     const segments = String(source.relativePath || "").split("/");
     if (
-      segments.length !== 3 ||
-      !/^[a-f0-9]{64}$/.test(segments[1])
+      ![2, 3].includes(segments.length) ||
+      !/^[a-f0-9]{64}$/.test(segments.at(-2))
     ) {
       continue;
     }
@@ -149,7 +152,9 @@ async function pruneEmptyContentAddressedDirectories(sources) {
     } catch {
       continue;
     }
-    await fs.rmdir(path.dirname(hashDirectory)).catch(() => {});
+    if (segments.length === 3) {
+      await fs.rmdir(path.dirname(hashDirectory)).catch(() => {});
+    }
   }
 }
 
@@ -295,14 +300,17 @@ export function createApp({
         const { config, collection } = await getCollection(
           request.params.collectionName
         );
-        const {
-          filename: originalName,
-          base,
-          extension
-        } = normalizeUploadFilename(request.query.filename);
+        const { filename: originalName } = normalizeUploadFilename(
+          request.query.filename
+        );
+        const widget = request.query.widget;
+        if (!["image", "file"].includes(widget)) {
+          throw httpError(400, `The upload widget must be "image" or "file".`);
+        }
         const acceptedTypes = configuredCollectionMediaAccept(
           config,
-          collection
+          collection,
+          widget
         );
         const uploadedFile = {
           filename: originalName,
@@ -319,43 +327,77 @@ export function createApp({
         }
         const { trustedMediaRoot } = await imageService.uploadDirectory(config);
         await cleanUploadDirectoryOnce(trustedMediaRoot);
-        const acceptedImageTypes = configuredCollectionMediaAccept(
-          config,
-          collection,
-          "image"
-        );
-        const validateTemporary = mediaFileMatchesAccept(
-          uploadedFile,
-          acceptedImageTypes
-        )
+        const validateTemporary = widget === "image"
           ? ({ temporaryPath }) =>
               validateUploadedImage(
                 temporaryPath,
                 originalName,
-                acceptedImageTypes
+                acceptedTypes
               )
           : undefined;
-        const { filename, sha } = await streamMediaUpload({
-          request,
-          directory: trustedMediaRoot,
-          collection: collection.name,
-          base,
-          extension,
-          maxBytes: maxUploadBytes,
-          validateTemporary
-        });
-
         const publicFolder = String(
           config.site?.public_folder || "/media"
         ).replace(/\/$/, "");
-        response.status(201).json({
+        const mediaFolder = String(
+          config.site?.media_folder || "content/media"
+        ).replace(/\/$/, "");
+        const storage = mediaStorageMode(config);
+        const descriptor = (filename, hash, reused, proposed = false) => ({
           filename,
-          sha,
-          path: `${publicFolder}/${collection.name}/${sha}/${filename}`,
-          storage_path: `${String(
-            config.site?.media_folder || "content/media"
-          ).replace(/\/$/, "")}/${collection.name}/${sha}/${filename}`
+          hash,
+          path: imageAssetMediaPath(
+            { hash, filename },
+            {
+              storage,
+              collection: storage === "api" ? collection.name : null,
+              publicFolder
+            }
+          ),
+          storage_path: storage === "api"
+            ? `${mediaFolder}/${collection.name}/${hash}/asset.dat`
+            : `${mediaFolder}/${hash}/${filename}`,
+          reused,
+          ...(proposed ? { proposed: true } : {})
         });
+
+        if (storage === "github") {
+          const result = await streamGithubMediaUpload({
+            request,
+            directory: trustedMediaRoot,
+            filename: originalName,
+            duplicate: request.query.duplicate,
+            maxBytes: maxUploadBytes,
+            validateTemporary
+          });
+          if (result.duplicate) {
+            response.status(409).json({
+              duplicate: true,
+              existing: descriptor(
+                result.existingFilename,
+                result.hash,
+                true
+              ),
+              copy: descriptor(result.copyFilename, result.hash, false, true)
+            });
+            return;
+          }
+          response.status(201).json(
+            descriptor(result.filename, result.hash, result.reused)
+          );
+          return;
+        }
+
+        const result = await streamMediaUpload({
+          request,
+          directory: trustedMediaRoot,
+          collection: collection.name,
+          filename: originalName,
+          maxBytes: maxUploadBytes,
+          validateTemporary
+        });
+        response.status(201).json(
+          descriptor(result.filename, result.hash, result.reused)
+        );
       } catch (error) {
         next(error);
       }
@@ -617,7 +659,7 @@ export function createApp({
 
   app.delete(
     "/api/collections/:collectionName/:recordId",
-    projectRead(async (request, response, next) => {
+    projectWrite(async (request, response, next) => {
       try {
         const { config, collection, folder } = await getCollection(
           request.params.collectionName
@@ -661,11 +703,50 @@ export function createApp({
           }
         }
 
+        const storage = mediaStorageMode(config);
         const mediaPaths = collection.delete_files_with_record
-          ? recordMediaStoragePaths(deletingRecord, config)
+          ? recordMediaStoragePaths(deletingRecord, config, {
+              storage,
+              collection: collection.name
+            })
           : [];
+        const referencedByOtherRecords = new Set();
+        if (mediaPaths.length) {
+          for (const [candidateCollectionName, candidateCollection] of Object.entries(
+            config.collections
+          )) {
+            if (isRemoteCollection(candidateCollection)) continue;
+            const candidateFolder = await configTransaction.resolveCollectionDirectory(
+              candidateCollection.folder
+            );
+            const candidateEntries = await fs.readdir(candidateFolder, {
+              withFileTypes: true
+            }).catch((error) => {
+              if (error.code === "ENOENT") return [];
+              throw error;
+            });
+            for (const entry of candidateEntries) {
+              if (
+                !entry.isFile() ||
+                ![".yml", ".yaml"].includes(path.extname(entry.name).toLowerCase())
+              ) continue;
+              const candidatePath = path.join(candidateFolder, entry.name);
+              if (candidatePath === filePath) continue;
+              const candidate = await readYaml(candidatePath);
+              for (const candidateMediaPath of recordMediaStoragePaths(
+                candidate,
+                config,
+                { storage, collection: candidateCollectionName }
+              )) {
+                referencedByOtherRecords.add(candidateMediaPath);
+              }
+            }
+          }
+        }
         const existingMediaSources = [];
-        for (const mediaPath of mediaPaths) {
+        for (const mediaPath of mediaPaths.filter(
+          (candidate) => !referencedByOtherRecords.has(candidate)
+        )) {
           try {
             const source = await resolveMediaSource({
               rootDir,

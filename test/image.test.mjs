@@ -4,9 +4,14 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
+import express from "express";
 import sharp from "sharp";
-import { imageServicePath } from "@signalwerk/minicms/core/image-service";
+import {
+  imageServicePath,
+  parseContentAddressedMediaPath
+} from "@signalwerk/minicms/core/image-service";
 import { createApp } from "../src/app.mjs";
+import { createMediaRouter } from "../src/image/routes.mjs";
 
 const SVG_SOURCE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80"><script>alert(1)</script><rect width="120" height="80" fill="red"/></svg>`;
 const PADDED_SVG_SOURCE = `<!--${" ".repeat(70 * 1024)}-->${SVG_SOURCE}`;
@@ -15,6 +20,8 @@ function configSource({ publicFolder = "/media", schema = "images_v1" } = {}) {
   return `connectors:
   default:
     name: api
+    api_url: https://api.example.com
+    auth_url: https://auth.example.com
 site:
   media_folder: content/uploads
   public_folder: ${publicFolder}
@@ -38,15 +45,27 @@ collections:
     folder: content/pages
     extension: yml
     node_type: page
+  images:
+    folder: content/images
+    extension: yml
+    node_type: page
+  files:
+    folder: content/files
+    extension: yml
+    node_type: page
 `;
 }
 
 async function makeFixture(options = {}) {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "minicms-images-"));
+  const rootDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), options.hiddenRoot ? ".minicms-images-" : "minicms-images-")
+  );
   const mediaDir = path.join(rootDir, "content", "uploads");
   const cacheDir = path.join(rootDir, "image-cache");
   await fs.mkdir(mediaDir, { recursive: true });
   await fs.mkdir(path.join(rootDir, "content", "pages"), { recursive: true });
+  await fs.mkdir(path.join(rootDir, "content", "images"), { recursive: true });
+  await fs.mkdir(path.join(rootDir, "content", "files"), { recursive: true });
   await fs.writeFile(
     path.join(rootDir, "cms.config.yml"),
     configSource(options),
@@ -190,7 +209,7 @@ async function makeFixture(options = {}) {
     const contents = await fs.readFile(sourcePath);
     const sha = createHash("sha256").update(contents).digest("hex");
     const directory = path.join(mediaDir, collection, sha);
-    const filePath = path.join(directory, filename);
+    const filePath = path.join(directory, "asset.dat");
     await fs.mkdir(directory, { recursive: true });
     await fs.copyFile(sourcePath, filePath);
     media[key] = Object.freeze({
@@ -271,7 +290,17 @@ async function putConfig(baseUrl, config) {
 }
 
 function servicePath(source, config, options = {}) {
-  return imageServicePath(source, { config, ...options });
+  const addressed = parseContentAddressedMediaPath(source, config);
+  return imageServicePath(
+    addressed
+      ? { hash: addressed.hash, filename: addressed.filename }
+      : source,
+    {
+      config,
+      collection: addressed?.collection || options.collection || "images",
+      ...options
+    }
+  );
 }
 
 async function cacheFiles(cacheDir) {
@@ -285,6 +314,10 @@ async function cacheFiles(cacheDir) {
   }
   await walk(cacheDir);
   return files;
+}
+
+function cachePathForRoute(route) {
+  return route.slice(1).replace(/\/[^/]+(\.[a-z0-9]+)$/, "/asset$1");
 }
 
 test("transforms content-addressed raster images, publishes safe info, and reuses the atomic disk cache", async () => {
@@ -342,7 +375,7 @@ test("transforms content-addressed raster images, publishes safe info, and reuse
     assert.equal(
       path.relative(cacheDir, files[0]),
       `images_v1/media/images/${addressedSha}/` +
-        "resize@width:60,height:40,fit:inside;quality@70/photo.webp"
+        "resize@width:60,height:40,fit:inside;quality@70/asset.webp"
     );
     assert.equal(files.some((file) => file.endsWith(".tmp")), false);
 
@@ -407,7 +440,7 @@ test("renders JPEG derivatives with both .jpg and .jpeg endings", async () => {
       (await cacheFiles(cacheDir))
         .map((file) => path.relative(cacheDir, file))
         .sort(),
-      routes.map((route) => route.slice(1)).sort()
+      routes.map(cachePathForRoute).sort()
     );
   });
 });
@@ -424,7 +457,7 @@ test("uploads directly into the readable content-addressed image route", async (
     }).png().toBuffer();
     const sha = createHash("sha256").update(original).digest("hex");
     const upload = await fetch(
-      `${baseUrl}/api/media/pages?filename=Fresh%20Image.png`,
+      `${baseUrl}/api/media/pages?filename=Fresh%20Image.png&widget=image`,
       {
         method: "POST",
         headers: { "content-type": "image/png" },
@@ -434,13 +467,14 @@ test("uploads directly into the readable content-addressed image route", async (
     assert.equal(upload.status, 201);
     const result = await upload.json();
     assert.deepEqual(result, {
-      filename: "fresh-image.png",
-      sha,
-      path: `/media/pages/${sha}/fresh-image.png`,
-      storage_path: `content/uploads/pages/${sha}/fresh-image.png`
+      filename: "Fresh Image.png",
+      hash: sha,
+      path: `/media/pages/${sha}/Fresh%20Image.png`,
+      storage_path: `content/uploads/pages/${sha}/asset.dat`,
+      reused: false
     });
     assert.deepEqual(
-      await fs.readFile(path.join(mediaDir, "pages", sha, "fresh-image.png")),
+      await fs.readFile(path.join(mediaDir, "pages", sha, "asset.dat")),
       original
     );
 
@@ -463,23 +497,44 @@ test("uploads directly into the readable content-addressed image route", async (
   });
 });
 
-test("resolves distinct readable filenames inside one content hash", async () => {
+test("cosmetic filenames share one source, derivative, ETag, and cache entry", async () => {
   await withServer(async ({ baseUrl, cacheDir, config, media }) => {
     const alias = "photo-alias.jpg";
-    await fs.copyFile(
-      media.photo.filePath,
-      path.join(path.dirname(media.photo.filePath), alias)
+    const rawOriginal = await fetch(`${baseUrl}${media.photo.source}`);
+    const rawAlias = await fetch(
+      `${baseUrl}/media/images/${media.photo.sha}/Anything%20Readable.jpg`
     );
-    const route = servicePath(
+    assert.equal(rawOriginal.status, 200);
+    assert.equal(rawAlias.status, 200);
+    assert.equal(rawOriginal.headers.get("etag"), rawAlias.headers.get("etag"));
+    assert.deepEqual(
+      Buffer.from(await rawOriginal.arrayBuffer()),
+      Buffer.from(await rawAlias.arrayBuffer())
+    );
+    const originalRoute = servicePath(media.photo.source, config, {
+      width: 24,
+      height: 24
+    });
+    const aliasRoute = servicePath(
       `/media/images/${media.photo.sha}/${alias}`,
       config,
       { width: 24, height: 24 }
     );
-    assert.match(route, /\/photo-alias\.webp$/);
-    assert.equal((await fetch(`${baseUrl}${route}`)).status, 200);
+    assert.match(aliasRoute, /\/photo-alias\.webp$/);
+    const original = await fetch(`${baseUrl}${originalRoute}`);
+    const aliased = await fetch(`${baseUrl}${aliasRoute}`);
+    assert.equal(original.status, 200);
+    assert.equal(aliased.status, 200);
+    assert.equal(original.headers.get("etag"), aliased.headers.get("etag"));
+    assert.deepEqual(
+      Buffer.from(await original.arrayBuffer()),
+      Buffer.from(await aliased.arrayBuffer())
+    );
     assert.deepEqual(
       (await cacheFiles(cacheDir)).map((file) => path.relative(cacheDir, file)),
-      [route.slice(1)]
+      [
+        cachePathForRoute(originalRoute)
+      ]
     );
   });
 });
@@ -899,8 +954,8 @@ test("strictly rejects noncanonical routes, invalid operations, and oversized ou
       404
     );
 
-    const badSlug = valid.replace("/photo.webp", "/duplicate.webp");
-    assert.equal((await fetch(`${baseUrl}${badSlug}`)).status, 404);
+    const cosmeticAlias = valid.replace("/photo.webp", "/duplicate.webp");
+    assert.equal((await fetch(`${baseUrl}${cosmeticAlias}`)).status, 200);
 
     const sourceRoute = valid.slice(0, valid.indexOf("/resize@"));
     const invalidOperations = `${sourceRoute}/quality@101/photo.webp`;
@@ -1031,6 +1086,36 @@ test("serves configured raw media safely and rejects symbolic links", async (t) 
     assert.match(range.headers.get("content-range"), /^bytes 0-9\//);
     assert.equal((await range.arrayBuffer()).byteLength, 10);
 
+    const firstByte = await fetch(`${baseUrl}${media.photo.source}`, {
+      headers: { range: "bytes=0-0" }
+    });
+    assert.equal(firstByte.status, 206);
+    assert.match(firstByte.headers.get("content-range"), /^bytes 0-0\//);
+    assert.equal((await firstByte.arrayBuffer()).byteLength, 1);
+
+    const weakIfRange = await fetch(`${baseUrl}${media.photo.source}`, {
+      headers: {
+        range: "bytes=0-0",
+        "if-range": `W/${raw.headers.get("etag")}`
+      }
+    });
+    assert.equal(weakIfRange.status, 200);
+    assert.equal(
+      (await weakIfRange.arrayBuffer()).byteLength,
+      (await fs.stat(media.photo.filePath)).size
+    );
+
+    const head = await fetch(`${baseUrl}${media.photo.source}`, {
+      method: "HEAD",
+      headers: { range: "bytes=0-0" }
+    });
+    assert.equal(head.status, 200);
+    assert.equal(
+      Number(head.headers.get("content-length")),
+      (await fs.stat(media.photo.filePath)).size
+    );
+    assert.equal((await head.arrayBuffer()).byteLength, 0);
+
     const download = await fetch(`${baseUrl}${media.notes.source}`);
     assert.equal(download.status, 200);
     assert.match(download.headers.get("content-disposition"), /^attachment;/);
@@ -1054,7 +1139,7 @@ test("serves configured raw media safely and rejects symbolic links", async (t) 
     await fs.writeFile(outside, "outside", "utf8");
     const linkedSha = "c".repeat(64);
     const linkedDirectory = path.join(mediaDir, "images", linkedSha);
-    const link = path.join(linkedDirectory, "linked.jpg");
+    const link = path.join(linkedDirectory, "asset.dat");
     const linkedSource = `/media/images/${linkedSha}/linked.jpg`;
     await fs.mkdir(linkedDirectory, { recursive: true });
     try {
@@ -1072,11 +1157,127 @@ test("serves configured raw media safely and rejects symbolic links", async (t) 
   });
 });
 
+test("raw delivery keeps streaming the verified open file after a path swap", async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "minicms-raw-open-file-"));
+  const original = Buffer.from("verified original bytes");
+  const replacement = Buffer.from("unverified replacement bytes");
+  const hash = createHash("sha256").update(original).digest("hex");
+  const sourcePath = path.join(rootDir, "asset.dat");
+  const displacedPath = path.join(rootDir, "verified.dat");
+  let openedHandle;
+  await fs.writeFile(sourcePath, original);
+  const config = {
+    connectors: { default: { name: "api" } },
+    site: { media_folder: "content/media", public_folder: "/media" }
+  };
+  const imageService = {
+    async raw() {
+      const stat = await fs.stat(sourcePath);
+      const fileHandle = await fs.open(sourcePath, "r");
+      openedHandle = fileHandle;
+      await fs.rename(sourcePath, displacedPath);
+      await fs.writeFile(sourcePath, replacement);
+      return {
+        source: { path: sourcePath, mtime: stat.mtime },
+        fileHandle,
+        length: original.length,
+        etag: `"sha256-${hash}"`,
+        mediaType: { kind: "unsupported" },
+        svg: false
+      };
+    }
+  };
+  const app = express();
+  app.use(createMediaRouter({ imageService, getConfig: async () => config }));
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  try {
+    const { port } = server.address();
+    const response = await fetch(
+      `http://127.0.0.1:${port}/media/images/${hash}/report.txt`
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), original);
+    await assert.rejects(
+      openedHandle.stat(),
+      (error) => error.code === "EBADF" || /closed/i.test(error.message)
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("raw conditional and metadata exits close their verified file handles", async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "minicms-raw-close-"));
+  const contents = Buffer.from("close every descriptor");
+  const hash = createHash("sha256").update(contents).digest("hex");
+  const sourcePath = path.join(rootDir, "asset.dat");
+  const etag = `"sha256-${hash}"`;
+  const handles = [];
+  await fs.writeFile(sourcePath, contents);
+  const config = {
+    connectors: { default: { name: "api" } },
+    site: { media_folder: "content/media", public_folder: "/media" }
+  };
+  const imageService = {
+    async raw() {
+      const stat = await fs.stat(sourcePath);
+      const fileHandle = await fs.open(sourcePath, "r");
+      handles.push(fileHandle);
+      return {
+        source: { path: sourcePath, mtime: stat.mtime },
+        fileHandle,
+        length: contents.length,
+        etag,
+        mediaType: { kind: "unsupported" },
+        svg: false
+      };
+    }
+  };
+  const app = express();
+  app.use(createMediaRouter({ imageService, getConfig: async () => config }));
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  try {
+    const { port } = server.address();
+    const url = `http://127.0.0.1:${port}/media/files/${hash}/report.txt`;
+    assert.equal((await fetch(url, {
+      method: "HEAD",
+      headers: { range: "bytes=0-0" }
+    })).status, 200);
+    assert.equal((await fetch(url, {
+      headers: { range: "bytes=999999-" }
+    })).status, 416);
+    assert.equal((await fetch(url, {
+      headers: { "if-none-match": etag }
+    })).status, 304);
+    assert.equal(handles.length, 3);
+    for (const fileHandle of handles) {
+      await assert.rejects(
+        fileHandle.stat(),
+        (error) => error.code === "EBADF" || /closed/i.test(error.message)
+      );
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("raw delivery works below a hidden project-root component", async () => {
+  await withServer(async ({ baseUrl, media }) => {
+    const response = await fetch(`${baseUrl}${media.photo.source}`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "image/jpeg");
+  }, { hiddenRoot: true });
+});
+
 test("streamed uploads enforce their byte limit", async () => {
   await withServer(async ({ baseUrl, mediaDir }) => {
     const jsonBody = JSON.stringify({ ok: true });
     const jsonUpload = await fetch(
-      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("data.json")}`,
+      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("data.json")}&widget=file`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1087,14 +1288,14 @@ test("streamed uploads enforce their byte limit", async () => {
     const jsonHash = createHash("sha256").update(jsonBody).digest("hex");
     assert.equal(
       await fs.readFile(
-        path.join(mediaDir, "pages", jsonHash, "data.json"),
+        path.join(mediaDir, "pages", jsonHash, "asset.dat"),
         "utf8"
       ),
       jsonBody
     );
 
     const oversized = await fetch(
-      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("too-large.bin")}`,
+      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("too-large.bin")}&widget=file`,
       {
         method: "POST",
         headers: { "content-type": "application/octet-stream" },
@@ -1220,7 +1421,7 @@ test("production authentication still protects mutations while public images rem
     await rawImage.arrayBuffer();
 
     const protectedUpload = await fetch(
-      `${baseUrl}/api/media/pages?filename=blocked.jpg`,
+      `${baseUrl}/api/media/pages?filename=blocked.jpg&widget=image`,
       {
         method: "POST",
         headers: { "content-type": "image/jpeg" },

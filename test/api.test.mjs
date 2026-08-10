@@ -5,6 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import { promises as fs } from "node:fs";
 import sharp from "sharp";
+import { imageServicePath } from "@signalwerk/minicms/core/image-service";
 import { createApp } from "../src/app.mjs";
 import {
   createConfigTransaction,
@@ -24,6 +25,8 @@ async function makeFixture() {
     `connectors:
   default:
     name: api
+    api_url: https://api.example.com
+    auth_url: https://auth.example.com
 site:
   media_folder: content/media
   public_folder: /media
@@ -563,7 +566,8 @@ test("stores remote aliases without treating them as local collections", async (
     );
     config.connectors.central_media = {
       name: "api",
-      api_url: "https://media.example"
+      api_url: "https://media.example",
+      auth_url: "https://auth.example.com"
     };
     config.node_types.central_image = {
       connector: "central_media",
@@ -605,7 +609,7 @@ test("stores remote aliases without treating them as local collections", async (
       ["PUT", "/api/collections/central_images/example"],
       ["DELETE", "/api/collections/central_images/example"],
       ["POST", "/api/collections/central_images/example/rename"],
-      ["POST", "/api/media/central_images?filename=example.png"]
+      ["POST", "/api/media/central_images?filename=example.png&widget=image"]
     ];
     for (const [method, pathname] of requests) {
       const response = await fetch(`${baseUrl}${pathname}`, {
@@ -660,7 +664,7 @@ test("rejects unknown detail field references in configuration", async () => {
   });
 });
 
-test("uploads media with safe collision-resistant filenames", async () => {
+test("deduplicates uploads by hash while preserving each cosmetic filename", async () => {
   await withServer(async (baseUrl, rootDir) => {
     const contents = await sharp({
       create: {
@@ -671,7 +675,7 @@ test("uploads media with safe collision-resistant filenames", async () => {
       }
     }).png().toBuffer();
     const upload = () =>
-      fetch(`${baseUrl}/api/media/pages?filename=${encodeURIComponent("Hero Image.png")}`, {
+      fetch(`${baseUrl}/api/media/pages?filename=${encodeURIComponent("Hero Image.png")}&widget=image`, {
         method: "POST",
         headers: { "content-type": "image/png" },
         body: contents
@@ -681,35 +685,44 @@ test("uploads media with safe collision-resistant filenames", async () => {
     assert.equal(first.status, 201);
     const firstResult = await first.json();
     const hash = sha256(contents);
-    assert.equal(firstResult.filename, "hero-image.png");
-    assert.equal(firstResult.sha, hash);
-    assert.equal(firstResult.path, `/media/pages/${hash}/hero-image.png`);
+    assert.equal(firstResult.filename, "Hero Image.png");
+    assert.equal(firstResult.hash, hash);
+    assert.equal(firstResult.path, `/media/pages/${hash}/Hero%20Image.png`);
+    assert.equal(firstResult.reused, false);
+    assert.equal(
+      firstResult.storage_path,
+      `content/media/pages/${hash}/asset.dat`
+    );
 
-    const second = await upload();
+    const second = await fetch(
+      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Another Name.png")}&widget=image`,
+      {
+        method: "POST",
+        headers: { "content-type": "image/png" },
+        body: contents
+      }
+    );
     assert.equal(second.status, 201);
     const secondResult = await second.json();
-    assert.equal(secondResult.filename, "hero-image-2.png");
-    assert.equal(secondResult.path, `/media/pages/${hash}/hero-image-2.png`);
+    assert.equal(secondResult.filename, "Another Name.png");
+    assert.equal(secondResult.path, `/media/pages/${hash}/Another%20Name.png`);
+    assert.equal(secondResult.reused, true);
 
     const concurrent = await Promise.all([upload(), upload(), upload()]);
     assert.deepEqual(
       concurrent.map((response) => response.status),
       [201, 201, 201]
     );
-    const concurrentNames = await Promise.all(
-      concurrent.map(async (response) => (await response.json()).filename)
+    const concurrentResults = await Promise.all(
+      concurrent.map((response) => response.json())
     );
-    assert.equal(
-      new Set([
-        firstResult.filename,
-        secondResult.filename,
-        ...concurrentNames
-      ]).size,
-      5
+    assert.deepEqual(
+      concurrentResults.map((result) => result.reused),
+      [true, true, true]
     );
 
     const stored = await fs.readFile(
-      path.join(rootDir, "content", "media", "pages", hash, "hero-image.png"),
+      path.join(rootDir, "content", "media", "pages", hash, "asset.dat"),
       null
     );
     assert.deepEqual(stored, contents);
@@ -717,7 +730,7 @@ test("uploads media with safe collision-resistant filenames", async () => {
     const maximumName = `${"a".repeat(251)}.png`;
     const uploadMaximumName = () =>
       fetch(
-        `${baseUrl}/api/media/pages?filename=${encodeURIComponent(maximumName)}`,
+        `${baseUrl}/api/media/pages?filename=${encodeURIComponent(maximumName)}&widget=image`,
         {
           method: "POST",
           headers: { "content-type": "image/png" },
@@ -732,7 +745,287 @@ test("uploads media with safe collision-resistant filenames", async () => {
     const maximumSecondName = (await maximumSecond.json()).filename;
     assert.equal(Buffer.byteLength(maximumFirstName), 255);
     assert.equal(Buffer.byteLength(maximumSecondName), 255);
-    assert.match(maximumSecondName, /-2\.png$/);
+    assert.equal(maximumSecondName, maximumFirstName);
+  });
+});
+
+test("publishes concurrent first uploads after racing to create the media root", async () => {
+  await withServer(async (baseUrl, rootDir) => {
+    const contents = await sharp({
+      create: {
+        width: 2,
+        height: 1,
+        channels: 3,
+        background: { r: 40, g: 50, b: 60 }
+      }
+    }).png().toBuffer();
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "media")),
+      (error) => error.code === "ENOENT"
+    );
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        fetch(
+          `${baseUrl}/api/media/pages?filename=first-${index}.png&widget=image`,
+          {
+            method: "POST",
+            headers: { "content-type": "image/png" },
+            body: contents
+          }
+        )
+      )
+    );
+    const results = await Promise.all(responses.map((response) => response.json()));
+    assert.deepEqual(
+      responses.map(({ status }) => status),
+      Array(8).fill(201),
+      JSON.stringify(results)
+    );
+    assert.equal(results.filter(({ reused }) => reused === false).length, 1);
+    assert.equal(results.filter(({ reused }) => reused === true).length, 7);
+    const hash = sha256(contents);
+    assert.deepEqual(
+      await fs.readdir(path.join(rootDir, "content", "media", "pages", hash)),
+      ["asset.dat"]
+    );
+  });
+});
+
+test("development mirrors GitHub media layout and requires a duplicate choice", async () => {
+  await withServer(async (baseUrl, rootDir) => {
+    const configResponse = await fetch(`${baseUrl}/api/config`);
+    const config = await configResponse.json();
+    config.connectors.default = {
+      name: "github",
+      repo: "signalwerk/example",
+      base_url: "https://auth.example.com",
+      branch: "main"
+    };
+    assert.equal(
+      (await putConfig(baseUrl, config, configResponse.headers.get("etag"))).status,
+      200
+    );
+    const body = await sharp({
+      create: {
+        width: 2,
+        height: 1,
+        channels: 3,
+        background: { r: 1, g: 2, b: 3 }
+      }
+    }).png().toBuffer();
+    const hash = sha256(body);
+    const upload = (duplicate) => fetch(
+      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Hero Image.png")}&widget=image${
+        duplicate ? `&duplicate=${duplicate}` : ""
+      }`,
+      {
+        method: "POST",
+        headers: { "content-type": "image/png" },
+        body
+      }
+    );
+
+    const first = await upload();
+    assert.equal(first.status, 201);
+    assert.deepEqual(await first.json(), {
+      filename: "Hero Image.png",
+      hash,
+      path: `/media/${hash}/Hero%20Image.png`,
+      storage_path: `content/media/${hash}/Hero Image.png`,
+      reused: false
+    });
+    const raw = await fetch(`${baseUrl}/media/${hash}/Anything%20Readable.jpg`);
+    assert.equal(raw.status, 200);
+    assert.deepEqual(Buffer.from(await raw.arrayBuffer()), body);
+    const derivative = imageServicePath(
+      { hash, filename: "Hero Image.png" },
+      { config, collection: "pages", width: 2, height: 1 }
+    );
+    const derivativeAlias = derivative.replace(
+      /\/[^/]+\.webp$/,
+      "/anything-readable.webp"
+    );
+    const originalDerivative = await fetch(`${baseUrl}${derivative}`);
+    const aliasedDerivative = await fetch(`${baseUrl}${derivativeAlias}`);
+    assert.equal(originalDerivative.status, 200);
+    assert.equal(aliasedDerivative.status, 200);
+    assert.equal(
+      originalDerivative.headers.get("etag"),
+      aliasedDerivative.headers.get("etag")
+    );
+    assert.equal(
+      (await fetch(`${baseUrl}${derivative.replace("/pages/", "/invented/")}`)).status,
+      404
+    );
+    const dotBody = await sharp({
+      create: {
+        width: 1,
+        height: 1,
+        channels: 3,
+        background: { r: 9, g: 8, b: 7 }
+      }
+    }).png().toBuffer();
+    const dotUpload = await fetch(
+      `${baseUrl}/api/media/pages?filename=.hero.png&widget=image`,
+      {
+        method: "POST",
+        headers: { "content-type": "image/png" },
+        body: dotBody
+      }
+    );
+    assert.equal(dotUpload.status, 201);
+    const dotDescriptor = await dotUpload.json();
+    assert.equal((await fetch(`${baseUrl}${dotDescriptor.path}`)).status, 200);
+    const conflict = await upload();
+    assert.equal(conflict.status, 409);
+    const choices = await conflict.json();
+    assert.equal(choices.duplicate, true);
+    assert.equal(choices.existing.filename, "Hero Image.png");
+    assert.equal(choices.copy.filename, "Hero Image-2.png");
+    assert.equal(choices.copy.proposed, true);
+
+    const reused = await upload("reuse");
+    assert.equal(reused.status, 201);
+    assert.equal((await reused.json()).reused, true);
+    const copied = await upload("copy");
+    assert.equal(copied.status, 201);
+    assert.equal((await copied.json()).filename, "Hero Image-2.png");
+    assert.deepEqual(
+      (await fs.readdir(path.join(rootDir, "content", "media", hash))).sort(),
+      ["Hero Image-2.png", "Hero Image.png"]
+    );
+  });
+});
+
+test("GitHub duplicate choices reject decomposed existing filenames", async () => {
+  await withServer(async (baseUrl, rootDir) => {
+    const configResponse = await fetch(`${baseUrl}/api/config`);
+    const config = await configResponse.json();
+    config.connectors.default = {
+      name: "github",
+      repo: "signalwerk/example",
+      base_url: "https://auth.example.com",
+      branch: "main"
+    };
+    assert.equal(
+      (await putConfig(baseUrl, config, configResponse.headers.get("etag"))).status,
+      200
+    );
+    const body = await sharp({
+      create: {
+        width: 2,
+        height: 1,
+        channels: 3,
+        background: { r: 3, g: 2, b: 1 }
+      }
+    }).png().toBuffer();
+    const hash = sha256(body);
+    const directory = path.join(rootDir, "content", "media", hash);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, "Cafe\u0301.png"), body);
+    const upload = (duplicate) => fetch(
+      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Café.png")}&widget=image${
+        duplicate ? `&duplicate=${duplicate}` : ""
+      }`,
+      {
+        method: "POST",
+        headers: { "content-type": "image/png" },
+        body
+      }
+    );
+
+    for (const duplicate of [undefined, "reuse", "copy"]) {
+      const response = await upload(duplicate);
+      assert.equal(response.status, 409);
+      assert.match((await response.json()).message, /not NFC-normalized/);
+    }
+    assert.deepEqual(await fs.readdir(directory), ["Cafe\u0301.png"]);
+  });
+});
+
+test("refuses a pre-existing API asset whose bytes do not match its hash directory", async () => {
+  await withServer(async (baseUrl, rootDir) => {
+    const body = await sharp({
+      create: {
+        width: 2,
+        height: 1,
+        channels: 3,
+        background: { r: 4, g: 5, b: 6 }
+      }
+    }).png().toBuffer();
+    const hash = sha256(body);
+    const directory = path.join(rootDir, "content", "media", "pages", hash);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, "asset.dat"), "wrong bytes");
+    const response = await fetch(
+      `${baseUrl}/api/media/pages?filename=valid.png&widget=image`,
+      {
+        method: "POST",
+        headers: { "content-type": "image/png" },
+        body
+      }
+    );
+    assert.equal(response.status, 409);
+    assert.match((await response.json()).message, /does not match/);
+    assert.equal(
+      await fs.readFile(path.join(directory, "asset.dat"), "utf8"),
+      "wrong bytes"
+    );
+  });
+});
+
+test("requires an upload widget and keeps mixed file acceptance out of image uploads", async () => {
+  await withServer(async (baseUrl) => {
+    const png = await sharp({
+      create: {
+        width: 1,
+        height: 1,
+        channels: 3,
+        background: { r: 7, g: 8, b: 9 }
+      }
+    }).png().toBuffer();
+    for (const query of [
+      "filename=missing.png",
+      "filename=invalid.png&widget=video"
+    ]) {
+      const response = await fetch(`${baseUrl}/api/media/pages?${query}`, {
+        method: "POST",
+        headers: { "content-type": "image/png" },
+        body: png
+      });
+      assert.equal(response.status, 400);
+      assert.match((await response.json()).message, /upload widget/);
+    }
+
+    const configResponse = await fetch(`${baseUrl}/api/config`);
+    const config = await configResponse.json();
+    config.node_types.page.fields.attachment = {
+      widget: "file",
+      accept: ["*/*"]
+    };
+    assert.equal(
+      (await putConfig(baseUrl, config, configResponse.headers.get("etag"))).status,
+      200
+    );
+    const rejectedImage = await fetch(
+      `${baseUrl}/api/media/pages?filename=notes.pdf&widget=image`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/pdf" },
+        body: "pdf"
+      }
+    );
+    assert.equal(rejectedImage.status, 400);
+    assert.match((await rejectedImage.json()).message, /image\/png/);
+    const acceptedFile = await fetch(
+      `${baseUrl}/api/media/pages?filename=notes.pdf&widget=file`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/pdf" },
+        body: "pdf"
+      }
+    );
+    assert.equal(acceptedFile.status, 201);
   });
 });
 
@@ -757,7 +1050,7 @@ test("cleans only service-owned upload temporaries before the first upload", asy
     }).png().toBuffer();
 
     const response = await fetch(
-      `${baseUrl}/api/media/pages?filename=clean.png`,
+      `${baseUrl}/api/media/pages?filename=clean.png&widget=image`,
       {
         method: "POST",
         headers: { "content-type": "image/png" },
@@ -778,7 +1071,7 @@ test("rejects unsafe upload filenames before writing a temporary file", async ()
       `${"a".repeat(256)}.png`
     ]) {
       const response = await fetch(
-        `${baseUrl}/api/media/pages?filename=${encodeURIComponent(filename)}`,
+        `${baseUrl}/api/media/pages?filename=${encodeURIComponent(filename)}&widget=image`,
         {
           method: "POST",
           headers: { "content-type": "image/png" },
@@ -812,7 +1105,7 @@ test("validates upload collections before reading or publishing media", async (t
       }
     }).png().toBuffer();
     const unknown = await fetch(
-      `${baseUrl}/api/media/missing?filename=hero.png`,
+      `${baseUrl}/api/media/missing?filename=hero.png&widget=image`,
       {
         method: "POST",
         headers: { "content-type": "image/png" },
@@ -836,7 +1129,7 @@ test("validates upload collections before reading or publishing media", async (t
     }
 
     const linked = await fetch(
-      `${baseUrl}/api/media/pages?filename=hero.png`,
+      `${baseUrl}/api/media/pages?filename=hero.png&widget=image`,
       {
         method: "POST",
         headers: { "content-type": "image/png" },
@@ -858,7 +1151,7 @@ test("uploads only configured image formats, including TIF and TIFF", async () =
   await withServer(async (baseUrl, rootDir) => {
     const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1" />';
     const accepted = await fetch(
-      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Diagram.svg")}`,
+      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Diagram.svg")}&widget=image`,
       {
         method: "POST",
         headers: { "content-type": "image/svg+xml" },
@@ -869,11 +1162,11 @@ test("uploads only configured image formats, including TIF and TIFF", async () =
     const svgHash = sha256(svg);
     assert.equal(
       (await accepted.json()).path,
-      `/media/pages/${svgHash}/diagram.svg`
+      `/media/pages/${svgHash}/Diagram.svg`
     );
     assert.equal(
       await fs.readFile(
-        path.join(rootDir, "content", "media", "pages", svgHash, "diagram.svg"),
+        path.join(rootDir, "content", "media", "pages", svgHash, "asset.dat"),
         "utf8"
       ),
       svg
@@ -892,7 +1185,7 @@ test("uploads only configured image formats, including TIF and TIFF", async () =
       ["Archive.tiff", "application/octet-stream"]
     ]) {
       const tiff = await fetch(
-        `${baseUrl}/api/media/pages?filename=${encodeURIComponent(filename)}`,
+        `${baseUrl}/api/media/pages?filename=${encodeURIComponent(filename)}&widget=image`,
         {
           method: "POST",
           headers: { "content-type": contentType },
@@ -900,15 +1193,14 @@ test("uploads only configured image formats, including TIF and TIFF", async () =
         }
       );
       assert.equal(tiff.status, 201);
-      const storedName = filename.toLowerCase();
       const tiffHash = sha256(tiffContents);
       assert.deepEqual(
         (await tiff.json()).path,
-        `/media/pages/${tiffHash}/${storedName}`
+        `/media/pages/${tiffHash}/${filename}`
       );
       assert.deepEqual(
         await fs.readFile(
-          path.join(rootDir, "content", "media", "pages", tiffHash, storedName),
+          path.join(rootDir, "content", "media", "pages", tiffHash, "asset.dat"),
           null
         ),
         tiffContents
@@ -929,7 +1221,7 @@ test("uploads only configured image formats, including TIF and TIFF", async () =
       ["mentioned-vector.svg", "image/svg+xml", Buffer.from("notes <svg />")]
     ]) {
       const mismatch = await fetch(
-        `${baseUrl}/api/media/pages?filename=${encodeURIComponent(filename)}`,
+        `${baseUrl}/api/media/pages?filename=${encodeURIComponent(filename)}&widget=image`,
         {
           method: "POST",
           headers: { "content-type": contentType },
@@ -950,7 +1242,7 @@ test("uploads only configured image formats, including TIF and TIFF", async () =
     const savedVectorOnlyConfig = await putConfig(baseUrl, vectorOnlyConfig);
     assert.equal(savedVectorOnlyConfig.status, 200);
     const spoofedMime = await fetch(
-      `${baseUrl}/api/media/pages?filename=spoofed.png`,
+      `${baseUrl}/api/media/pages?filename=spoofed.png&widget=image`,
       {
         method: "POST",
         headers: { "content-type": "image/svg+xml" },
@@ -961,7 +1253,7 @@ test("uploads only configured image formats, including TIF and TIFF", async () =
     assert.match((await spoofedMime.json()).message, /image\/svg\+xml/);
 
     const rejected = await fetch(
-      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Photo.jpg")}`,
+      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Photo.jpg")}&widget=image`,
       {
         method: "POST",
         headers: { "content-type": "image/jpeg" },
@@ -979,7 +1271,7 @@ test("uploads only configured image formats, including TIF and TIFF", async () =
 test("uploads generic files when a file field accepts all MIME types", async () => {
   await withServer(async (baseUrl, rootDir) => {
     const rejectedByPages = await fetch(
-      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Research notes.pdf")}`,
+      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Research notes.pdf")}&widget=file`,
       {
         method: "POST",
         headers: { "content-type": "application/pdf" },
@@ -989,7 +1281,7 @@ test("uploads generic files when a file field accepts all MIME types", async () 
     assert.equal(rejectedByPages.status, 400);
 
     const uploaded = await fetch(
-      `${baseUrl}/api/media/files?filename=${encodeURIComponent("Research notes.pdf")}`,
+      `${baseUrl}/api/media/files?filename=${encodeURIComponent("Research notes.pdf")}&widget=file`,
       {
         method: "POST",
         headers: { "content-type": "application/pdf" },
@@ -1000,7 +1292,7 @@ test("uploads generic files when a file field accepts all MIME types", async () 
     const pdfHash = sha256("fake-pdf");
     assert.equal(
       (await uploaded.json()).path,
-      `/media/files/${pdfHash}/research-notes.pdf`
+      `/media/files/${pdfHash}/Research%20notes.pdf`
     );
     assert.equal(
       await fs.readFile(
@@ -1010,7 +1302,7 @@ test("uploads generic files when a file field accepts all MIME types", async () 
           "media",
           "files",
           pdfHash,
-          "research-notes.pdf"
+          "asset.dat"
         ),
         "utf8"
       ),
@@ -1143,19 +1435,14 @@ test("deletes leaf records and their configured uploads but refuses to orphan ch
     );
     await fs.mkdir(childDirectory, { recursive: true });
     await fs.writeFile(
-      path.join(childDirectory, "child.png"),
-      "child-image",
-      "utf8"
-    );
-    await fs.writeFile(
-      path.join(childDirectory, "child-2.png"),
+      path.join(childDirectory, "asset.dat"),
       "child-image",
       "utf8"
     );
     const home = await fetch(`${baseUrl}/api/collections/pages/home`).then(
       (response) => response.json()
     );
-    home.properties.image = `/media/pages/${childHash}/child-2.png`;
+    home.properties.image = { hash: childHash, filename: "child-2.png" };
     const savedHome = await fetch(`${baseUrl}/api/collections/pages/home`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -1170,7 +1457,7 @@ test("deletes leaf records and their configured uploads but refuses to orphan ch
         uuid: "49c0c569-a0e1-4c4c-85c6-14b659aebd2d",
         parent_uuid: "84a3ef27-cdce-477b-863f-c1f418037685",
         title: "Child page",
-        image: `/media/pages/${childHash}/child.png`,
+        image: { hash: childHash, filename: "child.png" },
         hidden: true
       },
       slots: { content: [] }
@@ -1197,7 +1484,7 @@ test("deletes leaf records and their configured uploads but refuses to orphan ch
     const missing = await fetch(`${baseUrl}/api/collections/pages/child-page`);
     assert.equal(missing.status, 404);
     assert.equal(
-      await fs.readFile(path.join(childDirectory, "child-2.png"), "utf8"),
+      await fs.readFile(path.join(childDirectory, "asset.dat"), "utf8"),
       "child-image"
     );
     const homeDelete = await fetch(`${baseUrl}/api/collections/pages/home`, {
@@ -1229,11 +1516,13 @@ test("record deletion never follows a linked media file", async (t) => {
     );
 
     const mediaDirectory = path.join(rootDir, "content", "media");
-    await fs.mkdir(mediaDirectory, { recursive: true });
     const outside = path.join(rootDir, "outside.png");
     await fs.writeFile(outside, "outside", "utf8");
+    const linkedHash = sha256("outside");
+    const linkedDirectory = path.join(mediaDirectory, "pages", linkedHash);
+    await fs.mkdir(linkedDirectory, { recursive: true });
     try {
-      await fs.symlink(outside, path.join(mediaDirectory, "linked.png"));
+      await fs.symlink(outside, path.join(linkedDirectory, "asset.dat"));
     } catch (error) {
       if (["EPERM", "EACCES", "ENOSYS"].includes(error.code)) {
         t.skip("Symbolic links are unavailable on this platform.");
@@ -1250,7 +1539,7 @@ test("record deletion never follows a linked media file", async (t) => {
         uuid: "c7eec0cc-b54a-4c22-a0bc-8b7eb9e5aab2",
         parent_uuid: "",
         title: "Linked page",
-        image: "/media/linked.png",
+        image: { hash: linkedHash, filename: "linked.png" },
         hidden: false
       },
       slots: { content: [] }

@@ -9,11 +9,12 @@
   },
   "scripts": {
     "dev": "node ./bin/minicms-api.mjs dev",
+    "migrate:images": "node ./bin/migrate-image-assets.mjs",
     "start": "node ./bin/minicms-api.mjs start",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "@signalwerk/minicms": "https://github.com/signalwerk/miniCMS/archive/f098b98a8a24f346364a2b77470cd1a06e42956f.tar.gz",
+    "@signalwerk/minicms": "https://github.com/signalwerk/miniCMS/archive/f82a40beb73c91f2c22a4d12342ead877cd6bd1e.tar.gz",
     "express": "^5.1.0",
     "mime-types": "^3.0.1",
     "sharp": "^0.35.3"

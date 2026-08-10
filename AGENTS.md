@@ -34,6 +34,14 @@ same change unless backward compatibility is explicitly requested.
   file and atomically publishes them without buffering originals in memory.
 - `bin/minicms-api.mjs` starts either the loopback-only unauthenticated `dev`
   service or the always-authenticated production `start` service.
+- `bin/migrate-image-assets.mjs` is the explicit offline, preflight-first
+  one-time migration from filename-backed API media and scalar/`src` image
+  values to `asset.dat` plus `{hash, filename}`. Run it only while the service
+  is stopped; `--write` requires a new backup directory outside the project.
+  Resolve physical project, cache, and would-be backup paths before overlap
+  checks so symlinked ancestors cannot redirect cleanup into protected data.
+  Delete only preflighted cache files, and abort if the cache inventory drifts
+  before cleanup so no unbacked late entry is removed.
 - Content-model behavior must remain DRY. Import it only through
   `@signalwerk/minicms/core/content`, `/core/connectors`, `/core/media`,
   `/core/slug`, and `/core/image-service`. Service configuration is a source
@@ -71,20 +79,26 @@ same change unless backward compatibility is explicitly requested.
   digests. It authorizes exactly GET/HEAD config, collection-list, and record
   routes; it never authorizes config writes, record mutations, renames, or
   uploads and never changes the GitHub identity gate for browser sessions.
-- All non-auth `/api/*` routes authenticate before large parsers. Keep the raw
-  `/media/<collection>/<sha256>/<filename>` route and canonical derivative
+- All non-auth `/api/*` routes authenticate before large parsers. Keep the
+  API-owned raw `/media/<collection>/<sha256>/<filename>`, GitHub-development
+  raw `/media/<sha256>/<filename>`, and canonical derivative
   `/<schema>/media/<collection>/<sha256>/<canonical-operations>/<output-name>.<format>`
   route explicitly public because they contain public website assets and
   `<img>` requests cannot attach bearer headers.
-- Public content-addressed media paths use exactly
-  `<collection>/<lowercase-sha256>/<filename>` below the configured media
-  folder. Resolve real paths and reject every symlink/non-regular file. Only
+- API-owned public media uses exactly
+  `<collection>/<lowercase-sha256>/asset.dat` below the configured media folder;
+  the requested raw filename is cosmetic. GitHub-owned development uses
+  `<lowercase-sha256>/<original-filename>` so the checkout stays committable.
+  Its public raw/derivative basename is still cosmetic and resolves a regular
+  file by verified hash; internal deletion resolves the exact stored filename.
+  Resolve real paths and reject every symlink/non-regular file. Only
   canonical segments returned by the shared route parser may enter mirrored
   cache paths; never use an unparsed request value. Encoded identifiers and
   flat raw paths are rejected. Verify source bytes against the route SHA-256
   before raw, metadata, SVG, cache-hit, or generated delivery; memoization must
-  be bounded and invalidated by the file-stat signature. SVG is exact
-  passthrough and must never reach Sharp.
+  be bounded and invalidated by the file-stat signature. Raw responses stream
+  the already-open verified file descriptor so a later path replacement cannot
+  select unverified bytes. SVG is exact passthrough and must never reach Sharp.
 - Source hashing and Sharp processing share a bounded service queue. Sharp
   always uses finite input/output/channel/timeout bounds. Project dimensions
   are URL-builder defaults; only deployment
@@ -99,20 +113,21 @@ same change unless backward compatibility is explicitly requested.
   result dimensions deterministically, pre-extracts the bounding patch, and
   counter-rotates only that patch. A following `inside` resize is fused before
   rotation so huge source crops still produce bounded derivatives.
-- Generated raster cache paths mirror their canonical public URL below the
+- Generated raster cache paths exclude the cosmetic output basename below the
   exact service-owned `MINICMS_IMAGE_CACHE_DIR` root:
-  `<schema>/media/<collection>/<sha256>/<canonical-operations>/<output-name>.<format>`.
+  `<schema>/media/<collection>/<sha256>/<canonical-operations>/asset.<format>`.
   Cache directories must remain regular contained directories. The service
   uses a SHA-256 digest of that route only for ETags and in-process miss
   deduplication; publication is atomic, hits are streamed, and cache I/O is
   best-effort. There is no maintenance, expiry, capacity accounting, or
-  eviction. Metadata JSON and byte-preserving SVG responses are not copied to
-  the raster cache.
+  eviction. In GitHub storage mode the derivative collection segment must name
+  a concrete local collection before the global hash source is considered, so
+  arbitrary collection aliases cannot multiply identical caches. Metadata JSON
+  and byte-preserving SVG responses are not copied to the raster cache.
 - JPEG derivatives accept both `jpg` and `jpeg` as canonical output formats;
   both use `image/jpeg` bytes and MIME type while retaining their requested
-  extension in the URL and mirrored cache filename.
-- Raw reusable `/media/<collection>/<sha256>/<filename>` files always revalidate
-  and support byte ranges;
+  extension in the URL and fixed `asset.jpg` or `asset.jpeg` cache filename.
+- Raw reusable media files always revalidate and support byte ranges;
   non-image files are attachments on the API origin. Only schema-based
   derivatives below
   `/<schema>/media/<collection>/<sha256>/<canonical-operations>/<output-name>.<format>`
@@ -165,13 +180,20 @@ same change unless backward compatibility is explicitly requested.
   work.
 - Upload routes validate a configured collection before reading the body and
   use only upload fields reachable from that collection and its nested slot
-  types; image bytes must match the filename format before publication. Compute
-  SHA-256 while streaming and publish below
-  `<collection>/<sha256>/<collision-safe-filename>`; never accept a client hash
-  or overwrite a concurrent upload. Collision suffixes remain inside the
-  255-byte component limit and preserve per-record file ownership for
-  `delete_files_with_record`. On first upload, remove only strictly named stale
-  upload temporaries left by an interrupted prior single-replica process.
+  types for the required exact `widget=image|file` query. Image bytes must match
+  the filename format before publication; a sibling `file: "*/*"` field must
+  never widen image acceptance. Compute
+  SHA-256 while streaming and never accept a client hash. API-owned storage
+  publishes exactly one verified `<collection>/<sha256>/asset.dat` and silently
+  reuses it for duplicate bytes. GitHub-owned development storage publishes
+  `<sha256>/<original-filename>` and requires an explicit reuse/copy choice for
+  a duplicate hash; non-NFC existing names fail closed instead of returning a
+  storage identity that does not exist on GitHub, and copies suffix safely
+  inside the 255-byte limit. First-upload directory creation must tolerate
+  concurrent requests racing on the same absent path.
+  `delete_files_with_record` scans every other local record and removes a
+  physical asset only after its last reference. On first upload, remove only
+  strictly named stale upload temporaries left by an interrupted prior process.
 - Production API CORS deliberately uses `Access-Control-Allow-Origin: *` and
   never credential cookies. It permits `If-Match` and exposes `ETag`. Every
   mutation and ordinary browser content read requires an opaque bearer issued
@@ -192,6 +214,7 @@ Requires Node.js 24 or newer.
 npm install
 npm run dev -- --project-root /path/to/project
 npm start -- --project-root /path/to/project
+npm run migrate:images -- --project-root /path/to/project --cache-dir /path/to/cache --check
 npm test
 docker compose config
 docker compose build

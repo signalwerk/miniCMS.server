@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import express from "express";
 import mime from "mime-types";
 import { parseContentAddressedMediaPath } from "@signalwerk/minicms/core/image-service";
+import { mediaStorageMode } from "../media-contract.mjs";
 import { parseImageRoute, requestError } from "./url.mjs";
 
 const DERIVATIVE_CACHE_CONTROL = "public, max-age=31536000, immutable";
@@ -110,7 +110,7 @@ async function sendFileResult(request, response, next, result, contentType) {
   }
 }
 
-function rawSecurityHeaders(response, result, contentType) {
+function rawSecurityHeaders(response, result, contentType, filename) {
   response.type(contentType);
   response.set({
     "cache-control": "public, max-age=0, must-revalidate",
@@ -124,9 +124,123 @@ function rawSecurityHeaders(response, result, contentType) {
       "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:"
     );
   } else if (!INLINE_RAW_IMAGE_TYPES.has(String(contentType).split(";", 1)[0])) {
-    response.attachment(path.basename(result.source.relativePath));
+    response.attachment(filename);
     response.type(contentType);
     response.set("content-security-policy", "sandbox; default-src 'none'");
+  }
+}
+
+function requestedByteRange(value, size) {
+  if (!value) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(value);
+  if (!match || (!match[1] && !match[2]) || size < 1) return false;
+  const first = match[1] ? Number(match[1]) : null;
+  const last = match[2] ? Number(match[2]) : null;
+  if (
+    (first !== null && !Number.isSafeInteger(first)) ||
+    (last !== null && (!Number.isSafeInteger(last) || last < 0))
+  ) {
+    return false;
+  }
+  if (first === null) {
+    if (last === 0) return false;
+    return {
+      start: Math.max(0, size - last),
+      end: size - 1
+    };
+  }
+  if (first >= size) return false;
+  const end = last === null ? size - 1 : Math.min(last, size - 1);
+  if (end < first) return false;
+  return { start: first, end };
+}
+
+function ifRangeMatches(request, result) {
+  const supplied = request.get("if-range");
+  if (!supplied) return true;
+  if (supplied.startsWith("W/")) return false;
+  if (supplied.startsWith('"')) return supplied === result.etag;
+  const date = new Date(supplied);
+  return (
+    !Number.isNaN(date.getTime()) &&
+    Math.floor(result.source.mtime.getTime() / 1000) <=
+      Math.floor(date.getTime() / 1000)
+  );
+}
+
+function rawModifiedSince(request, mtime) {
+  if (request.get("if-none-match")) return false;
+  const supplied = request.get("if-modified-since");
+  if (!supplied) return false;
+  const date = new Date(supplied);
+  return (
+    !Number.isNaN(date.getTime()) &&
+    Math.floor(mtime.getTime() / 1000) <= Math.floor(date.getTime() / 1000)
+  );
+}
+
+async function sendRawResult(
+  request,
+  response,
+  next,
+  result,
+  contentType,
+  filename
+) {
+  rawSecurityHeaders(response, result, contentType, filename);
+  response.set({
+    "accept-ranges": "bytes",
+    etag: result.etag,
+    "last-modified": result.source.mtime.toUTCString()
+  });
+  if (
+    finishNotModified(request, response, result.etag) ||
+    rawModifiedSince(request, result.source.mtime)
+  ) {
+    if (!response.headersSent) {
+      response.removeHeader("content-length");
+      response.status(304).end();
+    }
+    await closeResultFile(result);
+    return;
+  }
+  const range = request.method === "GET" && ifRangeMatches(request, result)
+    ? requestedByteRange(request.get("range"), result.length)
+    : null;
+  if (range === false) {
+    await closeResultFile(result);
+    response
+      .status(416)
+      .set("content-range", `bytes */${result.length}`)
+      .set("content-length", "0")
+      .end();
+    return;
+  }
+  const length = range
+    ? range.end - range.start + 1
+    : result.length;
+  response.set("content-length", String(length));
+  if (range) {
+    response
+      .status(206)
+      .set("content-range", `bytes ${range.start}-${range.end}/${result.length}`);
+  } else {
+    response.status(200);
+  }
+  if (request.method === "HEAD") {
+    await closeResultFile(result);
+    response.end();
+    return;
+  }
+  const stream = result.fileHandle.createReadStream({
+    autoClose: true,
+    ...(range ? { start: range.start, end: range.end } : {})
+  });
+  try {
+    await pipeline(stream, response);
+  } catch (error) {
+    if (response.headersSent) response.destroy(error);
+    else next(error);
   }
 }
 
@@ -181,10 +295,19 @@ function createMediaRouter({ imageService, getConfig }) {
     serveImage
   );
 
-  router.get("/media/:collection/:sha/:filename", async (request, response, next) => {
+  async function serveRaw(request, response, next) {
     try {
+      const config = await getConfig();
+      const storage = mediaStorageMode(config);
+      const requestedForm = request.params.collection === undefined
+        ? "github"
+        : "api";
+      if (storage !== requestedForm) {
+        throw requestError(404, "The requested media file does not exist.");
+      }
       const addressed = parseContentAddressedMediaPath(
-        `/media/${String(request.params.collection || "")}/${String(request.params.sha || "")}/${String(request.params.filename || "")}`
+        request.originalUrl.split("?", 1)[0],
+        config
       );
       if (
         !addressed ||
@@ -192,9 +315,9 @@ function createMediaRouter({ imageService, getConfig }) {
       ) {
         throw requestError(404, "The requested media file does not exist.");
       }
-      const result = await imageService.raw(addressed.path);
+      const result = await imageService.raw(addressed.path, { config });
       const inferredContentType =
-        mime.lookup(result.source.relativePath) || "application/octet-stream";
+        mime.lookup(addressed.filename) || "application/octet-stream";
       const contentType = result.svg
         ? CONTENT_TYPES.svg
         : result.mediaType.kind === "raster"
@@ -202,13 +325,14 @@ function createMediaRouter({ imageService, getConfig }) {
           : inferredContentType === "image/svg+xml"
             ? "application/octet-stream"
             : inferredContentType;
-      rawSecurityHeaders(response, result, contentType);
-      response.sendFile(result.source.path, {
-        acceptRanges: true,
-        cacheControl: false,
-        dotfiles: "deny",
-        lastModified: true
-      });
+      await sendRawResult(
+        request,
+        response,
+        next,
+        result,
+        contentType,
+        addressed.filename
+      );
     } catch (error) {
       next(
         error.status === 400
@@ -216,7 +340,10 @@ function createMediaRouter({ imageService, getConfig }) {
           : error
       );
     }
-  });
+  }
+
+  router.get("/media/:collection/:sha/:filename", serveRaw);
+  router.get("/media/:sha/:filename", serveRaw);
 
   return router;
 }

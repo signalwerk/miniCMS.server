@@ -1,10 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { sanitizeFilenameStem } from "@signalwerk/minicms/core/slug";
+import { ASSET_FILENAME } from "./media-contract.mjs";
 
 const MAX_FILENAME_BYTES = 255;
 const UPLOAD_TEMP_PATTERN = /^\.minicms-upload-\d+-[a-f0-9]{20}\.tmp$/;
+const githubPublicationLocks = new Map();
 
 function uploadError(status, message) {
   const error = new Error(message);
@@ -30,7 +31,7 @@ function mediaUploadLimit(environment = process.env) {
 }
 
 function normalizeUploadFilename(value) {
-  const filename = String(value ?? "");
+  const filename = String(value ?? "").normalize("NFC");
   if (
     !filename ||
     filename === "." ||
@@ -46,11 +47,7 @@ function normalizeUploadFilename(value) {
   }
   return {
     filename,
-    extension,
-    base: sanitizeFilenameStem(
-      path.basename(filename, extension),
-      "image"
-    )
+    extension
   };
 }
 
@@ -153,10 +150,10 @@ function isInside(parent, candidate) {
   );
 }
 
-async function ensureUploadDirectory(mediaRoot, collection, sha) {
+async function ensureUploadDirectory(mediaRoot, segments) {
   const trustedRoot = await fs.realpath(mediaRoot);
   let current = trustedRoot;
-  for (const segment of [collection, sha]) {
+  for (const segment of segments) {
     current = path.join(current, segment);
     try {
       await fs.mkdir(current, { mode: 0o755 });
@@ -176,37 +173,152 @@ async function ensureUploadDirectory(mediaRoot, collection, sha) {
   return current;
 }
 
-async function publishUpload(
-  temporaryPath,
-  directory,
-  { base, extension }
-) {
-  const existingNames = new Set(
-    (await fs.readdir(directory)).map((name) => name.toLowerCase())
-  );
+async function hashRegularFile(filePath) {
+  const before = await fs.lstat(filePath, { bigint: true });
+  if (before.isSymbolicLink() || !before.isFile()) {
+    throw uploadError(409, "The stored media asset is invalid.");
+  }
+  const handle = await fs.open(filePath, "r");
+  try {
+    const opened = await handle.stat({ bigint: true });
+    // Dropping the publisher's temporary hard link legitimately changes ctime
+    // after asset.dat is visible. The verified digest below remains the source
+    // of truth; inode, size, and mtime still guard replacement/content races.
+    if (
+      !opened.isFile() ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino ||
+      opened.size !== before.size ||
+      opened.mtimeNs !== before.mtimeNs
+    ) {
+      throw uploadError(409, "The stored media asset changed while it was verified.");
+    }
+    const digest = createHash("sha256");
+    for await (const chunk of handle.createReadStream({ autoClose: false })) {
+      digest.update(chunk);
+    }
+    const finished = await handle.stat({ bigint: true });
+    if (
+      finished.dev !== opened.dev ||
+      finished.ino !== opened.ino ||
+      finished.size !== opened.size ||
+      finished.mtimeNs !== opened.mtimeNs
+    ) {
+      throw uploadError(409, "The stored media asset changed while it was verified.");
+    }
+    return digest.digest("hex");
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
+async function publishUpload(temporaryPath, directory, expectedHash) {
   await fs.chmod(temporaryPath, 0o644);
-  let suffix = 1;
-  while (true) {
-    const numericSuffix = suffix === 1 ? "" : `-${suffix}`;
-    const maximumBaseLength =
-      MAX_FILENAME_BYTES - numericSuffix.length - extension.length;
-    const candidateBase =
-      base.slice(0, maximumBaseLength).replace(/[._-]+$/g, "") || "image";
-    const filename = `${candidateBase}${numericSuffix}${extension}`;
-    suffix += 1;
-    if (existingNames.has(filename.toLowerCase())) continue;
-    const destination = path.join(directory, filename);
-    try {
-      // Linking publishes without replacing a file created by a concurrent
-      // upload. Both paths live in the same configured media filesystem.
-      await fs.link(temporaryPath, destination);
-      // The link is the commit point. A failed temporary-file cleanup must not
-      // report a failed upload after the destination is already visible.
-      await fs.unlink(temporaryPath).catch(() => {});
-      return filename;
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      existingNames.add(filename.toLowerCase());
+  const destination = path.join(directory, ASSET_FILENAME);
+  try {
+    // Linking publishes a complete file without replacing a concurrent upload.
+    await fs.link(temporaryPath, destination);
+    await fs.unlink(temporaryPath).catch(() => {});
+    return { reused: false };
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    if (await hashRegularFile(destination) !== expectedHash) {
+      throw uploadError(
+        409,
+        "The stored media asset does not match its content-addressed directory."
+      );
+    }
+    return { reused: true };
+  }
+}
+
+function truncateUtf8(value, maximumBytes) {
+  let output = "";
+  for (const character of value) {
+    if (Buffer.byteLength(output + character, "utf8") > maximumBytes) break;
+    output += character;
+  }
+  return output;
+}
+
+async function githubAssets(directory, expectedHash) {
+  const entries = await fs.readdir(directory, { withFileTypes: true });
+  const filenames = [];
+  const canonicalNames = new Set();
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (!entry.isFile() || entry.isSymbolicLink()) {
+      throw uploadError(409, "The GitHub media directory is invalid.");
+    }
+    const filePath = path.join(directory, entry.name);
+    if (await hashRegularFile(filePath) !== expectedHash) {
+      throw uploadError(
+        409,
+        "A GitHub media file does not match its content-addressed directory."
+      );
+    }
+    const { filename } = normalizeUploadFilename(entry.name);
+    if (filename !== entry.name) {
+      throw uploadError(
+        409,
+        "The GitHub media directory contains a filename that is not NFC-normalized."
+      );
+    }
+    const canonicalKey = filename.toLowerCase();
+    if (canonicalNames.has(canonicalKey)) {
+      throw uploadError(
+        409,
+        "The GitHub media directory contains ambiguous normalized filenames."
+      );
+    }
+    canonicalNames.add(canonicalKey);
+    filenames.push(filename);
+  }
+  return filenames;
+}
+
+function availableGithubFilename(requested, existing) {
+  const names = new Set(existing.map((name) => name.toLowerCase()));
+  if (!names.has(requested.toLowerCase())) return requested;
+  const extension = path.extname(requested);
+  const stem = path.basename(requested, extension);
+  for (let suffix = 2; suffix < Number.MAX_SAFE_INTEGER; suffix += 1) {
+    const marker = `-${suffix}`;
+    const maximumStemBytes = MAX_FILENAME_BYTES - Buffer.byteLength(marker + extension);
+    const candidateStem = truncateUtf8(stem, maximumStemBytes).replace(/[._-]+$/u, "") || "file";
+    const candidate = `${candidateStem}${marker}${extension}`;
+    if (!names.has(candidate.toLowerCase())) return candidate;
+  }
+  throw uploadError(409, "A unique GitHub media filename could not be allocated.");
+}
+
+async function publishGithubUpload(temporaryPath, directory, filename) {
+  await fs.chmod(temporaryPath, 0o644);
+  const destination = path.join(directory, filename);
+  try {
+    await fs.link(temporaryPath, destination);
+    await fs.unlink(temporaryPath).catch(() => {});
+    return true;
+  } catch (error) {
+    if (error.code === "EEXIST") return false;
+    throw error;
+  }
+}
+
+async function withGithubPublicationLock(key, operation) {
+  const previous = githubPublicationLocks.get(key) || Promise.resolve();
+  let release;
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => pending);
+  githubPublicationLocks.set(key, tail);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (githubPublicationLocks.get(key) === tail) {
+      githubPublicationLocks.delete(key);
     }
   }
 }
@@ -215,8 +327,7 @@ async function streamMediaUpload({
   request,
   directory,
   collection,
-  base,
-  extension,
+  filename,
   maxBytes,
   validateTemporary
 }) {
@@ -228,16 +339,85 @@ async function streamMediaUpload({
   );
   try {
     await validateTemporary?.({ temporaryPath, sha, size });
-    const uploadDirectory = await ensureUploadDirectory(
-      directory,
+    const uploadDirectory = await ensureUploadDirectory(directory, [
       normalizedCollection,
       sha
-    );
-    const filename = await publishUpload(temporaryPath, uploadDirectory, {
-      base,
-      extension
+    ]);
+    const { reused } = await publishUpload(temporaryPath, uploadDirectory, sha);
+    return {
+      collection: normalizedCollection,
+      filename,
+      hash: sha,
+      reused,
+      size
+    };
+  } finally {
+    await fs.unlink(temporaryPath).catch(() => {});
+  }
+}
+
+async function streamGithubMediaUpload({
+  request,
+  directory,
+  filename,
+  duplicate,
+  maxBytes,
+  validateTemporary
+}) {
+  if (![undefined, "reuse", "copy"].includes(duplicate)) {
+    throw uploadError(400, "The duplicate upload choice is invalid.");
+  }
+  const { temporaryPath, size, sha } = await writeUploadTemporary(
+    request,
+    directory,
+    maxBytes
+  );
+  try {
+    await validateTemporary?.({ temporaryPath, sha, size });
+    const uploadDirectory = await ensureUploadDirectory(directory, [sha]);
+    return await withGithubPublicationLock(uploadDirectory, async () => {
+      let existing = await githubAssets(uploadDirectory, sha);
+      if (!existing.length) {
+        if (await publishGithubUpload(temporaryPath, uploadDirectory, filename)) {
+          return { filename, hash: sha, reused: false, size };
+        }
+        existing = await githubAssets(uploadDirectory, sha);
+      }
+
+      const existingFilename = existing[0];
+      if (duplicate === "reuse") {
+        return {
+          filename: existingFilename,
+          hash: sha,
+          reused: true,
+          size
+        };
+      }
+
+      const copyFilename = availableGithubFilename(filename, existing);
+      if (duplicate !== "copy") {
+        return {
+          duplicate: true,
+          existingFilename,
+          copyFilename,
+          hash: sha,
+          size
+        };
+      }
+
+      let candidate = copyFilename;
+      const attempted = [];
+      while (!(await publishGithubUpload(
+        temporaryPath,
+        uploadDirectory,
+        candidate
+      ))) {
+        attempted.push(candidate);
+        existing = await githubAssets(uploadDirectory, sha);
+        candidate = availableGithubFilename(filename, [...existing, ...attempted]);
+      }
+      return { filename: candidate, hash: sha, reused: false, size };
     });
-    return { collection: normalizedCollection, filename, sha, size };
   } finally {
     await fs.unlink(temporaryPath).catch(() => {});
   }
@@ -247,5 +427,6 @@ export {
   cleanUploadTemporaries,
   mediaUploadLimit,
   normalizeUploadFilename,
+  streamGithubMediaUpload,
   streamMediaUpload
 };

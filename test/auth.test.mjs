@@ -36,6 +36,8 @@ async function makeFixture() {
     `connectors:
   default:
     name: api
+    api_url: https://api.example.com
+    auth_url: https://auth.example.com
 site:
   media_folder: content/media
   public_folder: /media
@@ -328,7 +330,7 @@ test("the production machine token can only read config and records", async () =
         ["PUT", "/api/collections/pages/home"],
         ["DELETE", "/api/collections/pages/home"],
         ["POST", "/api/collections/pages/home/rename"],
-        ["POST", "/api/media/pages?filename=blocked.png"]
+        ["POST", "/api/media/pages?filename=blocked.png&widget=image"]
       ];
       for (const [method, pathname] of forbiddenRequests) {
         const response = await fetch(`${baseUrl}${pathname}`, {
