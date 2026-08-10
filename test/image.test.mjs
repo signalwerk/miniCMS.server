@@ -1273,6 +1273,18 @@ test("raw delivery works below a hidden project-root component", async () => {
   }, { hiddenRoot: true });
 });
 
+test("raw delivery returns 404 when the project content root is absent", async () => {
+  await withServer(async ({ baseUrl, media }) => {
+    const response = await fetch(`${baseUrl}${media.photo.source}`);
+    assert.equal(response.status, 404);
+    assert.match((await response.json()).message, /does not exist/);
+  }, {
+    beforeStart: async ({ rootDir }) => {
+      await fs.rm(path.join(rootDir, "content"), { recursive: true });
+    }
+  });
+});
+
 test("streamed uploads enforce their byte limit", async () => {
   await withServer(async ({ baseUrl, mediaDir }) => {
     const jsonBody = JSON.stringify({ ok: true });

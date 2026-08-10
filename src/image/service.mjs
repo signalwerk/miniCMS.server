@@ -168,7 +168,10 @@ async function safeDirectory(rootDir, configuredMediaFolder, { create = false } 
   try {
     contentStat = await fs.lstat(contentRoot);
   } catch (error) {
-    if (error.code !== "ENOENT" || !create) throw error;
+    if (error.code !== "ENOENT") throw error;
+    if (!create) {
+      throw sourceError(404, "The configured media folder does not exist.");
+    }
     await fs.mkdir(contentRoot).catch((mkdirError) => {
       if (mkdirError.code !== "EEXIST") throw mkdirError;
     });

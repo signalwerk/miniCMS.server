@@ -94,11 +94,13 @@ same change unless backward compatibility is explicitly requested.
   Resolve real paths and reject every symlink/non-regular file. Only
   canonical segments returned by the shared route parser may enter mirrored
   cache paths; never use an unparsed request value. Encoded identifiers and
-  flat raw paths are rejected. Verify source bytes against the route SHA-256
-  before raw, metadata, SVG, cache-hit, or generated delivery; memoization must
-  be bounded and invalidated by the file-stat signature. Raw responses stream
-  the already-open verified file descriptor so a later path replacement cannot
-  select unverified bytes. SVG is exact passthrough and must never reach Sharp.
+  flat raw paths are rejected. Missing content/media roots are ordinary public
+  404 responses rather than internal errors. Verify source bytes against the
+  route SHA-256 before raw, metadata, SVG, cache-hit, or generated delivery;
+  memoization must be bounded and invalidated by the file-stat signature. Raw
+  responses stream the already-open verified file descriptor so a later path
+  replacement cannot select unverified bytes. SVG is exact passthrough and must
+  never reach Sharp.
 - Source hashing and Sharp processing share a bounded service queue. Sharp
   always uses finite input/output/channel/timeout bounds. Project dimensions
   are URL-builder defaults; only deployment
