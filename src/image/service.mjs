@@ -1029,6 +1029,66 @@ async function ensureCacheRoot(cacheRoot, rootDir) {
   return trustedRoot;
 }
 
+async function removeCollectionCacheDirectories(cacheRoot, rootDir, collection) {
+  if (
+    typeof collection !== "string" ||
+    !collection ||
+    collection === "." ||
+    collection === ".." ||
+    Buffer.byteLength(collection, "utf8") > 255 ||
+    /[\\/\u0000-\u001f\u007f]/.test(collection)
+  ) {
+    throw new Error("The image cache collection name is invalid.");
+  }
+  const rootStat = await fs.lstat(cacheRoot).catch((error) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (!rootStat) return;
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error("The image cache root is not a regular directory.");
+  }
+  const trustedRoot = await fs.realpath(cacheRoot);
+  const contentRoot = await fs.realpath(path.resolve(rootDir, "content")).catch(
+    (error) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    }
+  );
+  if (contentRoot && isInside(contentRoot, trustedRoot)) {
+    throw new Error("The image cache root must stay outside project content.");
+  }
+
+  const schemas = await fs.readdir(trustedRoot, { withFileTypes: true });
+  for (const schema of schemas) {
+    if (!schema.isDirectory() || schema.isSymbolicLink()) continue;
+    const schemaPath = path.join(trustedRoot, schema.name);
+    const mediaPath = path.join(schemaPath, "media");
+    const mediaStat = await fs.lstat(mediaPath).catch((error) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (!mediaStat) continue;
+    if (mediaStat.isSymbolicLink() || !mediaStat.isDirectory()) {
+      throw new Error("The image cache media namespace is not a regular directory.");
+    }
+    const destination = path.join(mediaPath, collection);
+    const destinationStat = await fs.lstat(destination).catch((error) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (!destinationStat) continue;
+    if (destinationStat.isSymbolicLink() || !destinationStat.isDirectory()) {
+      throw new Error("The image cache collection namespace is not a regular directory.");
+    }
+    const resolvedDestination = await fs.realpath(destination);
+    if (!isInside(trustedRoot, resolvedDestination)) {
+      throw new Error("The image cache collection resolves outside its owned root.");
+    }
+    await fs.rm(resolvedDestination, { recursive: true, force: false });
+  }
+}
+
 function cacheRouteSegments(route) {
   const segments = [
     route.schema,
@@ -1349,9 +1409,24 @@ function createImageService({
     return imageProjectConfiguration(config, operational, status);
   }
 
+  async function removeCollectionCaches(collectionNames) {
+    for (const collection of new Set(collectionNames)) {
+      try {
+        await removeCollectionCacheDirectories(
+          operational.cacheRoot,
+          rootDir,
+          collection
+        );
+      } catch (error) {
+        warnCache(`cleanup for collection "${collection}"`, error);
+      }
+    }
+  }
+
   return Object.freeze({
     info,
     raw,
+    removeCollectionCaches,
     transformed,
     uploadDirectory,
     validateProjectConfiguration

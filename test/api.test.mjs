@@ -6,6 +6,7 @@ import os from "node:os";
 import { promises as fs } from "node:fs";
 import sharp from "sharp";
 import { imageServicePath } from "@signalwerk/minicms/core/image-service";
+import { parseYaml } from "@signalwerk/minicms/core/content";
 import { createApp } from "../src/app.mjs";
 import {
   createConfigTransaction,
@@ -14,6 +15,10 @@ import {
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+async function readYaml(filePath) {
+  return parseYaml(await fs.readFile(filePath, "utf8"));
 }
 
 async function makeFixture() {
@@ -95,9 +100,37 @@ slots:
   return rootDir;
 }
 
-async function withServer(run) {
+async function useGithubStorage(rootDir) {
+  const configPath = path.join(rootDir, "cms.config.yml");
+  const source = await fs.readFile(configPath, "utf8");
+  await fs.writeFile(
+    configPath,
+    source.replace(
+      `  default:
+    name: api
+    api_url: https://api.example.com
+    auth_url: https://auth.example.com`,
+      `  default:
+    name: github
+    repo: signalwerk/example
+    base_url: https://auth.example.com
+    branch: main`
+    ),
+    "utf8"
+  );
+}
+
+async function withServer(run, options = {}) {
   const rootDir = await makeFixture();
-  const server = createApp({ rootDir }).listen(0, "127.0.0.1");
+  await options.prepareRoot?.(rootDir);
+  const environment = typeof options.environment === "function"
+    ? options.environment(rootDir)
+    : options.environment;
+  const server = createApp({
+    rootDir,
+    ...(environment ? { environment } : {}),
+    ...(options.imageLogger ? { imageLogger: options.imageLogger } : {})
+  }).listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   const address = server.address();
   try {
@@ -108,7 +141,12 @@ async function withServer(run) {
   }
 }
 
-async function putConfig(baseUrl, config, etag) {
+async function putConfig(
+  baseUrl,
+  config,
+  etag,
+  schemaRenames = { node_types: {}, collections: {} }
+) {
   let revision = etag;
   if (!revision) {
     const current = await fetch(`${baseUrl}/api/config`);
@@ -120,7 +158,7 @@ async function putConfig(baseUrl, config, etag) {
       "content-type": "application/json",
       "if-match": revision
     },
-    body: JSON.stringify(config)
+    body: JSON.stringify({ config, schema_renames: schemaRenames })
   });
 }
 
@@ -226,7 +264,10 @@ test("requires the current config ETag before saving", async () => {
     const missing = await fetch(`${baseUrl}/api/config`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(config)
+      body: JSON.stringify({
+        config,
+        schema_renames: { node_types: {}, collections: {} }
+      })
     });
     assert.equal(missing.status, 428);
 
@@ -283,6 +324,558 @@ test("moves a populated collection folder in the config transaction", async () =
       fs.access(path.join(rootDir, TRANSACTION_ROOT_NAME)),
       (error) => error.code === "ENOENT"
     );
+  });
+});
+
+test("requires the explicit configuration-save envelope", async () => {
+  await withServer(async (baseUrl) => {
+    const loaded = await fetch(`${baseUrl}/api/config`);
+    const config = await loaded.json();
+    const headers = {
+      "content-type": "application/json",
+      "if-match": loaded.headers.get("etag")
+    };
+    for (const body of [
+      config,
+      { config },
+      { config, schema_renames: {} },
+      {
+        config,
+        schema_renames: { node_types: {}, collections: {}, extra: {} }
+      },
+      {
+        config,
+        schema_renames: { node_types: [], collections: {} }
+      },
+      {
+        config,
+        schema_renames: { node_types: {}, collections: {} },
+        extra: true
+      }
+    ]) {
+      const response = await fetch(`${baseUrl}/api/config`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify(body)
+      });
+      assert.equal(response.status, 400);
+    }
+
+    const accepted = await fetch(`${baseUrl}/api/config`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        config,
+        schema_renames: { node_types: {}, collections: {} }
+      })
+    });
+    assert.equal(accepted.status, 200);
+  });
+});
+
+test("validates schema rename plans before inspecting or writing collection storage", async () => {
+  await withServer(async (baseUrl, rootDir) => {
+    const loaded = await fetch(`${baseUrl}/api/config`);
+    const current = await loaded.json();
+    const etag = loaded.headers.get("etag");
+    const originalConfig = await fs.readFile(
+      path.join(rootDir, "cms.config.yml"),
+      "utf8"
+    );
+    const next = structuredClone(current);
+    next.collections.documents = next.collections.pages;
+    delete next.collections.pages;
+    delete next.collections.files;
+    next.collections.documents.folder = "content/documents";
+    const rejected = await putConfig(baseUrl, next, etag, {
+      node_types: {},
+      collections: {
+        pages: "documents",
+        files: "documents"
+      }
+    });
+    assert.equal(rejected.status, 400);
+    assert.match((await rejected.json()).message, /one-to-one/);
+    assert.equal(
+      await fs.readFile(path.join(rootDir, "cms.config.yml"), "utf8"),
+      originalConfig
+    );
+    await fs.access(path.join(rootDir, "content", "pages", "home.yml"));
+    await fs.access(path.join(rootDir, "content", "files"));
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "documents")),
+      (error) => error.code === "ENOENT"
+    );
+    await assert.rejects(
+      fs.access(path.join(rootDir, TRANSACTION_ROOT_NAME)),
+      (error) => error.code === "ENOENT"
+    );
+  });
+});
+
+test("rejects media storage-mode changes without an explicit offline migration", async () => {
+  await withServer(async (baseUrl, rootDir) => {
+    const loaded = await fetch(`${baseUrl}/api/config`);
+    const next = await loaded.json();
+    const originalConfig = await fs.readFile(
+      path.join(rootDir, "cms.config.yml"),
+      "utf8"
+    );
+    const originalRecord = await fs.readFile(
+      path.join(rootDir, "content", "pages", "home.yml"),
+      "utf8"
+    );
+    next.connectors.default = {
+      name: "github",
+      repo: "signalwerk/example",
+      base_url: "https://auth.example.com",
+      branch: "main"
+    };
+    const rejected = await putConfig(
+      baseUrl,
+      next,
+      loaded.headers.get("etag")
+    );
+    assert.equal(rejected.status, 400);
+    assert.match((await rejected.json()).message, /cannot change media storage mode/);
+    assert.equal(
+      await fs.readFile(path.join(rootDir, "cms.config.yml"), "utf8"),
+      originalConfig
+    );
+    assert.equal(
+      await fs.readFile(
+        path.join(rootDir, "content", "pages", "home.yml"),
+        "utf8"
+      ),
+      originalRecord
+    );
+    await assert.rejects(
+      fs.access(path.join(rootDir, TRANSACTION_ROOT_NAME)),
+      (error) => error.code === "ENOENT"
+    );
+  });
+});
+
+test("rejects media-folder changes without an explicit offline migration", async () => {
+  await withServer(async (baseUrl, rootDir) => {
+    const loaded = await fetch(`${baseUrl}/api/config`);
+    const next = await loaded.json();
+    const configPath = path.join(rootDir, "cms.config.yml");
+    const originalConfig = await fs.readFile(configPath, "utf8");
+    const mediaSentinel = path.join(
+      rootDir,
+      "content",
+      "media",
+      "pages",
+      "sentinel.txt"
+    );
+    await fs.mkdir(path.dirname(mediaSentinel), { recursive: true });
+    await fs.writeFile(mediaSentinel, "keep");
+    next.site.media_folder = "content/assets";
+
+    const rejected = await putConfig(
+      baseUrl,
+      next,
+      loaded.headers.get("etag")
+    );
+    assert.equal(rejected.status, 400);
+    assert.match((await rejected.json()).message, /cannot change site\.media_folder/);
+    assert.equal(await fs.readFile(configPath, "utf8"), originalConfig);
+    assert.equal(await fs.readFile(mediaSentinel, "utf8"), "keep");
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "assets")),
+      (error) => error.code === "ENOENT"
+    );
+    await assert.rejects(
+      fs.access(path.join(rootDir, TRANSACTION_ROOT_NAME)),
+      (error) => error.code === "ENOENT"
+    );
+  });
+});
+
+test("transactionally renames concrete schema keys, records, media, and cache namespaces", async () => {
+  await withServer(async (baseUrl, rootDir) => {
+    const loaded = await fetch(`${baseUrl}/api/config`);
+    const current = await loaded.json();
+    const etag = loaded.headers.get("etag");
+    const imageBytes = Buffer.from("schema-rename-image");
+    const imageHash = sha256(imageBytes);
+    const fileHash = sha256("schema-rename-file");
+    const structuredImage = {
+      hash: imageHash,
+      filename: "Original image.png"
+    };
+    await fs.writeFile(
+      path.join(rootDir, "content", "pages", "home.yml"),
+      `id: home
+type: page
+order: 0
+properties:
+  uuid: 84a3ef27-cdce-477b-863f-c1f418037685
+  parent_uuid: null
+  title: Home
+  image:
+    hash: ${imageHash}
+    filename: Original image.png
+slots:
+  content:
+    - id: abcdefghijklmno
+      type: text
+      order: 0
+      properties:
+        text: '[Page](minicms://reference/pages/home)'
+      slots: {}
+`,
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(rootDir, "content", "files", "manual.yml"),
+      `id: manual
+type: download
+order: 0
+properties:
+  file: /media/pages/${fileHash}/Manual.pdf
+slots: {}
+`,
+      "utf8"
+    );
+    const mediaSource = path.join(
+      rootDir,
+      "content",
+      "media",
+      "pages",
+      imageHash
+    );
+    await fs.mkdir(mediaSource, { recursive: true });
+    await fs.writeFile(path.join(mediaSource, "asset.dat"), imageBytes);
+    const cacheRoot = path.join(rootDir, "image-cache");
+    const oldCache = path.join(
+      cacheRoot,
+      "images_v1",
+      "media",
+      "pages",
+      imageHash,
+      "noop"
+    );
+    const unrelatedCache = path.join(
+      cacheRoot,
+      "images_v1",
+      "media",
+      "files",
+      fileHash,
+      "noop"
+    );
+    await fs.mkdir(oldCache, { recursive: true });
+    await fs.mkdir(unrelatedCache, { recursive: true });
+    await fs.writeFile(path.join(oldCache, "asset.png"), "old cache");
+    await fs.writeFile(path.join(unrelatedCache, "asset.png"), "keep cache");
+
+    const next = structuredClone(current);
+    next.node_types.article = next.node_types.page;
+    delete next.node_types.page;
+    next.node_types.rich_text = next.node_types.text;
+    delete next.node_types.text;
+    next.node_types.article.slots.content.allowed_types = ["rich_text"];
+    next.collections.documents = next.collections.pages;
+    delete next.collections.pages;
+    next.collections.documents.folder = "content/documents";
+    next.collections.documents.node_type = "article";
+    next.collections.documents.allowed_types = ["article"];
+    next.collections.documents.hierarchy.allowed_child_types = ["article"];
+
+    const saved = await putConfig(baseUrl, next, etag, {
+      node_types: { page: "article", text: "rich_text" },
+      collections: { pages: "documents" }
+    });
+    const savedBody = await saved.text();
+    assert.equal(saved.status, 200, savedBody);
+    const result = JSON.parse(savedBody);
+    assert.deepEqual(result.schema_renames, {
+      node_types: { page: "article", text: "rich_text" },
+      collections: { pages: "documents" }
+    });
+
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "pages")),
+      (error) => error.code === "ENOENT"
+    );
+    const migratedPage = await readYaml(
+      path.join(rootDir, "content", "documents", "home.yml")
+    );
+    assert.equal(migratedPage.type, "article");
+    assert.equal(migratedPage.slots.content[0].type, "rich_text");
+    assert.equal(
+      migratedPage.slots.content[0].properties.text,
+      "[Page](minicms://reference/documents/home)"
+    );
+    assert.deepEqual(migratedPage.properties.image, structuredImage);
+    assert.equal(
+      (
+        await readYaml(path.join(rootDir, "content", "files", "manual.yml"))
+      ).properties.file,
+      `/media/documents/${fileHash}/Manual.pdf`
+    );
+    assert.deepEqual(
+      await fs.readFile(
+        path.join(
+          rootDir,
+          "content",
+          "media",
+          "documents",
+          imageHash,
+          "asset.dat"
+        )
+      ),
+      imageBytes
+    );
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "media", "pages")),
+      (error) => error.code === "ENOENT"
+    );
+    await assert.rejects(fs.access(oldCache), (error) => error.code === "ENOENT");
+    assert.equal(
+      await fs.readFile(path.join(unrelatedCache, "asset.png"), "utf8"),
+      "keep cache"
+    );
+
+    const raw = await fetch(
+      `${baseUrl}/media/documents/${imageHash}/A-different-name.png`
+    );
+    assert.equal(raw.status, 200);
+    assert.deepEqual(Buffer.from(await raw.arrayBuffer()), imageBytes);
+    assert.equal(
+      (
+        await fetch(`${baseUrl}/media/pages/${imageHash}/Original.png`)
+      ).status,
+      404
+    );
+  }, {
+    environment: (rootDir) => ({
+      MINICMS_IMAGE_CACHE_DIR: path.join(rootDir, "image-cache")
+    })
+  });
+});
+
+test("keeps GitHub media global while renaming collection records and cache keys", async () => {
+  await withServer(async (baseUrl, rootDir) => {
+    const initial = await fetch(`${baseUrl}/api/config`);
+    const current = await initial.json();
+
+    const incidentalHash = "a".repeat(64);
+    const filePath = path.join(rootDir, "content", "files", "manual.yml");
+    await fs.writeFile(
+      filePath,
+      `id: manual
+type: download
+order: 0
+properties:
+  file: /media/pages/${incidentalHash}/Manual.pdf
+slots: {}
+`,
+      "utf8"
+    );
+    const globalSentinel = path.join(
+      rootDir,
+      "content",
+      "media",
+      "pages",
+      "unrelated",
+      "sentinel.txt"
+    );
+    await fs.mkdir(path.dirname(globalSentinel), { recursive: true });
+    await fs.writeFile(globalSentinel, "keep global media");
+    const oldCache = path.join(
+      rootDir,
+      "image-cache",
+      "images_v1",
+      "media",
+      "pages",
+      incidentalHash,
+      "noop"
+    );
+    await fs.mkdir(oldCache, { recursive: true });
+    await fs.writeFile(path.join(oldCache, "asset.png"), "stale cache");
+
+    const next = structuredClone(current);
+    next.collections.documents = next.collections.pages;
+    delete next.collections.pages;
+    next.collections.documents.folder = "content/documents";
+    const renamed = await putConfig(
+      baseUrl,
+      next,
+      initial.headers.get("etag"),
+      {
+        node_types: {},
+        collections: { pages: "documents" }
+      }
+    );
+    assert.equal(renamed.status, 200, await renamed.text());
+    await fs.access(path.join(rootDir, "content", "documents", "home.yml"));
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "pages")),
+      (error) => error.code === "ENOENT"
+    );
+    assert.equal(await fs.readFile(globalSentinel, "utf8"), "keep global media");
+    assert.equal(
+      (await readYaml(filePath)).properties.file,
+      `/media/pages/${incidentalHash}/Manual.pdf`
+    );
+    await assert.rejects(fs.access(oldCache), (error) => error.code === "ENOENT");
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "media", "documents")),
+      (error) => error.code === "ENOENT"
+    );
+  }, {
+    prepareRoot: useGithubStorage,
+    environment: (rootDir) => ({
+      MINICMS_IMAGE_CACHE_DIR: path.join(rootDir, "image-cache")
+    })
+  });
+});
+
+test("renames remote aliases in local records without moving connector-owned storage", async () => {
+  await withServer(async (baseUrl, rootDir) => {
+    const initial = await fetch(`${baseUrl}/api/config`);
+    const current = await initial.json();
+    current.connectors.central = {
+      name: "api",
+      api_url: "https://media.example.com",
+      auth_url: "https://auth.example.com"
+    };
+    current.collections.central_sources = {
+      connector: "central",
+      remote_collection: "sources"
+    };
+    const prepared = await putConfig(
+      baseUrl,
+      current,
+      initial.headers.get("etag")
+    );
+    assert.equal(prepared.status, 200);
+
+    const pagePath = path.join(rootDir, "content", "pages", "home.yml");
+    await fs.writeFile(
+      pagePath,
+      `id: home
+type: page
+order: 0
+properties:
+  uuid: 84a3ef27-cdce-477b-863f-c1f418037685
+  parent_uuid: null
+  title: Home
+slots:
+  content:
+    - id: abcdefghijklmno
+      type: text
+      order: 0
+      properties:
+        text: '[Source](minicms://reference/central_sources/item-1)'
+      slots: {}
+`,
+      "utf8"
+    );
+    const cacheSentinel = path.join(
+      rootDir,
+      "image-cache",
+      "images_v1",
+      "media",
+      "central_sources",
+      "hash",
+      "noop",
+      "asset.png"
+    );
+    await fs.mkdir(path.dirname(cacheSentinel), { recursive: true });
+    await fs.writeFile(cacheSentinel, "remote cache namespace");
+
+    const next = structuredClone(current);
+    next.collections.library_sources = next.collections.central_sources;
+    delete next.collections.central_sources;
+    const renamed = await putConfig(
+      baseUrl,
+      next,
+      prepared.headers.get("etag"),
+      {
+        node_types: {},
+        collections: { central_sources: "library_sources" }
+      }
+    );
+    assert.equal(renamed.status, 200, await renamed.text());
+    assert.equal(
+      (await readYaml(pagePath)).slots.content[0].properties.text,
+      "[Source](minicms://reference/library_sources/item-1)"
+    );
+    assert.equal(await fs.readFile(cacheSentinel, "utf8"), "remote cache namespace");
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "central_sources")),
+      (error) => error.code === "ENOENT"
+    );
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "library_sources")),
+      (error) => error.code === "ENOENT"
+    );
+  }, {
+    environment: (rootDir) => ({
+      MINICMS_IMAGE_CACHE_DIR: path.join(rootDir, "image-cache")
+    })
+  });
+});
+
+test("commits schema renames before best-effort cache cleanup and never follows cache links", async (t) => {
+  const warnings = [];
+  await withServer(async (baseUrl, rootDir) => {
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "minicms-cache-link-"));
+    t.after(() => fs.rm(outside, { recursive: true, force: true }));
+    const sentinel = path.join(outside, "sentinel.txt");
+    await fs.writeFile(sentinel, "keep");
+    const linkedCollection = path.join(
+      rootDir,
+      "image-cache",
+      "images_v1",
+      "media",
+      "pages"
+    );
+    await fs.mkdir(path.dirname(linkedCollection), { recursive: true });
+    try {
+      await fs.symlink(outside, linkedCollection);
+    } catch (error) {
+      if (["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) {
+        t.diagnostic(`symlink assertion skipped: ${error.code}`);
+        return;
+      }
+      throw error;
+    }
+
+    const loaded = await fetch(`${baseUrl}/api/config`);
+    const next = await loaded.json();
+    next.collections.documents = next.collections.pages;
+    delete next.collections.pages;
+    next.collections.documents.folder = "content/documents";
+    const saved = await putConfig(
+      baseUrl,
+      next,
+      loaded.headers.get("etag"),
+      {
+        node_types: {},
+        collections: { pages: "documents" }
+      }
+    );
+    assert.equal(saved.status, 200);
+    await fs.access(path.join(rootDir, "content", "documents", "home.yml"));
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "pages")),
+      (error) => error.code === "ENOENT"
+    );
+    assert.equal(await fs.readFile(sentinel, "utf8"), "keep");
+    assert.ok(warnings.some((message) => /cache cleanup/.test(message)));
+  }, {
+    environment: (rootDir) => ({
+      MINICMS_IMAGE_CACHE_DIR: path.join(rootDir, "image-cache")
+    }),
+    imageLogger: {
+      warn(message) {
+        warnings.push(message);
+      }
+    }
   });
 });
 
@@ -344,6 +937,59 @@ test("keeps new and moved empty API collections virtual until first write", asyn
   });
 });
 
+test("renames empty and virtual collection storage without inventing missing folders", async () => {
+  await withServer(async (baseUrl, rootDir) => {
+    const loaded = await fetch(`${baseUrl}/api/config`);
+    const current = await loaded.json();
+    current.collections.virtual = {
+      folder: "content/virtual",
+      extension: "yml",
+      node_type: "download",
+      allowed_types: ["download"]
+    };
+    const prepared = await putConfig(
+      baseUrl,
+      current,
+      loaded.headers.get("etag")
+    );
+    assert.equal(prepared.status, 200);
+
+    const next = structuredClone(current);
+    next.collections.downloads = next.collections.files;
+    delete next.collections.files;
+    next.collections.downloads.folder = "content/downloads";
+    next.collections.virtual_copy = next.collections.virtual;
+    delete next.collections.virtual;
+    next.collections.virtual_copy.folder = "content/virtual-copy";
+    const saved = await putConfig(
+      baseUrl,
+      next,
+      prepared.headers.get("etag"),
+      {
+        node_types: {},
+        collections: {
+          files: "downloads",
+          virtual: "virtual_copy"
+        }
+      }
+    );
+    assert.equal(saved.status, 200);
+    assert.deepEqual(await fs.readdir(path.join(rootDir, "content", "downloads")), []);
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "files")),
+      (error) => error.code === "ENOENT"
+    );
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "virtual")),
+      (error) => error.code === "ENOENT"
+    );
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "virtual-copy")),
+      (error) => error.code === "ENOENT"
+    );
+  });
+});
+
 test("rejects collection folder collisions without changing config or content", async () => {
   await withServer(async (baseUrl, rootDir) => {
     const loaded = await fetch(`${baseUrl}/api/config`);
@@ -387,6 +1033,357 @@ test("rejects collection folder collisions without changing config or content", 
         "utf8"
       ),
       "keep"
+    );
+  });
+});
+
+test("rejects a collection move into its own source tree", async () => {
+  await withServer(async (baseUrl, rootDir) => {
+    const loaded = await fetch(`${baseUrl}/api/config`);
+    const config = await loaded.json();
+    const originalConfig = await fs.readFile(
+      path.join(rootDir, "cms.config.yml"),
+      "utf8"
+    );
+    const originalRecord = await fs.readFile(
+      path.join(rootDir, "content", "pages", "home.yml"),
+      "utf8"
+    );
+    config.collections.pages.folder = "content/pages/archive";
+
+    const rejected = await putConfig(
+      baseUrl,
+      config,
+      loaded.headers.get("etag")
+    );
+    assert.equal(rejected.status, 400);
+    assert.match((await rejected.json()).message, /cannot contain or be contained/);
+    assert.equal(
+      await fs.readFile(path.join(rootDir, "cms.config.yml"), "utf8"),
+      originalConfig
+    );
+    assert.equal(
+      await fs.readFile(
+        path.join(rootDir, "content", "pages", "home.yml"),
+        "utf8"
+      ),
+      originalRecord
+    );
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "pages", "archive")),
+      (error) => error.code === "ENOENT"
+    );
+    await assert.rejects(
+      fs.access(path.join(rootDir, TRANSACTION_ROOT_NAME)),
+      (error) => error.code === "ENOENT"
+    );
+  });
+});
+
+test("transactionally migrates record filenames when the YAML extension changes", async () => {
+  for (const renameCollection of [false, true]) {
+    await withServer(async (baseUrl, rootDir) => {
+      const loaded = await fetch(`${baseUrl}/api/config`);
+      const next = await loaded.json();
+      const collectionName = renameCollection ? "documents" : "pages";
+      if (renameCollection) {
+        next.collections.documents = next.collections.pages;
+        delete next.collections.pages;
+        next.collections.documents.folder = "content/documents";
+      }
+      next.collections[collectionName].extension = "yaml";
+      const saved = await putConfig(
+        baseUrl,
+        next,
+        loaded.headers.get("etag"),
+        renameCollection
+          ? {
+              node_types: {},
+              collections: { pages: "documents" }
+            }
+          : undefined
+      );
+      assert.equal(saved.status, 200, await saved.text());
+      const folder = path.join(rootDir, "content", collectionName);
+      await assert.rejects(
+        fs.access(path.join(folder, "home.yml")),
+        (error) => error.code === "ENOENT"
+      );
+      assert.equal((await readYaml(path.join(folder, "home.yaml"))).id, "home");
+      assert.equal(
+        (
+          await fetch(`${baseUrl}/api/collections/${collectionName}/home`).then(
+            (response) => response.json()
+          )
+        ).properties.title,
+        "Home"
+      );
+      if (renameCollection) {
+        await assert.rejects(
+          fs.access(path.join(rootDir, "content", "pages")),
+          (error) => error.code === "ENOENT"
+        );
+      }
+      await assert.rejects(
+        fs.access(path.join(rootDir, TRANSACTION_ROOT_NAME)),
+        (error) => error.code === "ENOENT"
+      );
+    });
+  }
+});
+
+test("rejects hidden file and tree collisions at migrated extension paths", async () => {
+  for (const collisionKind of ["file", "directory"]) {
+    await withServer(async (baseUrl, rootDir) => {
+      const loaded = await fetch(`${baseUrl}/api/config`);
+      const next = await loaded.json();
+      const configPath = path.join(rootDir, "cms.config.yml");
+      const originalConfig = await fs.readFile(configPath, "utf8");
+      const oldRecordPath = path.join(rootDir, "content", "pages", "home.yml");
+      const originalRecord = await fs.readFile(oldRecordPath, "utf8");
+      const collisionName = collisionKind === "file"
+        ? "home.yaml"
+        : "rogue.YAML";
+      const collisionPath = path.join(
+        rootDir,
+        "content",
+        "pages",
+        collisionName
+      );
+      if (collisionKind === "file") {
+        await fs.writeFile(collisionPath, "hidden collision");
+      } else {
+        await fs.mkdir(collisionPath);
+        await fs.writeFile(path.join(collisionPath, "sentinel.txt"), "keep");
+      }
+      next.collections.pages.extension = "yaml";
+
+      const rejected = await putConfig(
+        baseUrl,
+        next,
+        loaded.headers.get("etag")
+      );
+      assert.ok([400, 409].includes(rejected.status));
+      assert.equal(await fs.readFile(configPath, "utf8"), originalConfig);
+      assert.equal(await fs.readFile(oldRecordPath, "utf8"), originalRecord);
+      if (collisionKind === "file") {
+        assert.equal(await fs.readFile(collisionPath, "utf8"), "hidden collision");
+      } else {
+        assert.equal(
+          await fs.readFile(path.join(collisionPath, "sentinel.txt"), "utf8"),
+          "keep"
+        );
+      }
+      await assert.rejects(
+        fs.access(path.join(rootDir, TRANSACTION_ROOT_NAME)),
+        (error) => error.code === "ENOENT"
+      );
+    });
+  }
+});
+
+test("rejects physical folders, files, and links for newly added collections", async (t) => {
+  await withServer(async (baseUrl, rootDir) => {
+    const loaded = await fetch(`${baseUrl}/api/config`);
+    const config = await loaded.json();
+    const etag = loaded.headers.get("etag");
+    const originalConfig = await fs.readFile(
+      path.join(rootDir, "cms.config.yml"),
+      "utf8"
+    );
+    await fs.mkdir(path.join(rootDir, "content", "occupied-directory"));
+    await fs.writeFile(
+      path.join(rootDir, "content", "occupied-file"),
+      "not a collection"
+    );
+    const candidates = [
+      ["duplicate_directory", "content/occupied-directory"],
+      ["duplicate_file", "content/occupied-file"]
+    ];
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "minicms-linked-"));
+    t.after(() => fs.rm(outside, { recursive: true, force: true }));
+    try {
+      await fs.symlink(outside, path.join(rootDir, "content", "occupied-link"));
+      candidates.push(["duplicate_link", "content/occupied-link"]);
+    } catch (error) {
+      if (!["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) throw error;
+      t.diagnostic(`symlink assertion skipped: ${error.code}`);
+    }
+
+    for (const [name, folder] of candidates) {
+      const next = structuredClone(config);
+      next.collections[name] = {
+        ...next.collections.pages,
+        folder
+      };
+      const rejected = await putConfig(baseUrl, next, etag);
+      assert.ok([400, 409].includes(rejected.status), `${name}: ${rejected.status}`);
+      assert.equal(
+        await fs.readFile(path.join(rootDir, "cms.config.yml"), "utf8"),
+        originalConfig
+      );
+    }
+
+    await fs.mkdir(
+      path.join(rootDir, "content", "media", "duplicate_media"),
+      { recursive: true }
+    );
+    const mediaConflict = structuredClone(config);
+    mediaConflict.collections.duplicate_media = {
+      ...mediaConflict.collections.pages,
+      folder: "content/clean-duplicate"
+    };
+    const rejectedMedia = await putConfig(baseUrl, mediaConflict, etag);
+    assert.equal(rejectedMedia.status, 409);
+    assert.equal(
+      await fs.readFile(path.join(rootDir, "cms.config.yml"), "utf8"),
+      originalConfig
+    );
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "clean-duplicate")),
+      (error) => error.code === "ENOENT"
+    );
+  });
+});
+
+test("preflights record identity, extension, and current schema before any rename writes", async () => {
+  const cases = [
+    {
+      name: "filename identity",
+      prepare: async (rootDir) => {
+        const recordPath = path.join(rootDir, "content", "pages", "home.yml");
+        const source = await fs.readFile(recordPath, "utf8");
+        await fs.writeFile(recordPath, source.replace("id: home", "id: mismatch"));
+      },
+      message: /id must match its filename stem/
+    },
+    {
+      name: "configured extension",
+      prepare: async (rootDir) => {
+        const source = await fs.readFile(
+          path.join(rootDir, "content", "pages", "home.yml"),
+          "utf8"
+        );
+        await fs.writeFile(
+          path.join(rootDir, "content", "pages", "rogue.yaml"),
+          source.replace("id: home", "id: rogue")
+        );
+      },
+      message: /configured \.yml extension/
+    },
+    {
+      name: "current schema",
+      prepare: async (rootDir) => {
+        const recordPath = path.join(rootDir, "content", "pages", "home.yml");
+        const source = await fs.readFile(recordPath, "utf8");
+        await fs.writeFile(recordPath, source.replace("type: page", "type: missing"));
+      },
+      message: /Record type "missing" is not allowed/
+    }
+  ];
+
+  for (const fixtureCase of cases) {
+    await withServer(async (baseUrl, rootDir) => {
+      const loaded = await fetch(`${baseUrl}/api/config`);
+      const current = await loaded.json();
+      const etag = loaded.headers.get("etag");
+      await fixtureCase.prepare(rootDir);
+      const sourceDirectory = path.join(rootDir, "content", "pages");
+      const before = await fs.readdir(sourceDirectory);
+      const originalConfig = await fs.readFile(
+        path.join(rootDir, "cms.config.yml"),
+        "utf8"
+      );
+      const mediaSource = path.join(
+        rootDir,
+        "content",
+        "media",
+        "pages",
+        "a".repeat(64)
+      );
+      await fs.mkdir(mediaSource, { recursive: true });
+      await fs.writeFile(path.join(mediaSource, "asset.dat"), "keep");
+
+      const next = structuredClone(current);
+      next.collections.documents = next.collections.pages;
+      delete next.collections.pages;
+      next.collections.documents.folder = "content/documents";
+      const rejected = await putConfig(baseUrl, next, etag, {
+        node_types: {},
+        collections: { pages: "documents" }
+      });
+      assert.equal(rejected.status, 400, fixtureCase.name);
+      assert.match((await rejected.json()).message, fixtureCase.message);
+      assert.equal(
+        await fs.readFile(path.join(rootDir, "cms.config.yml"), "utf8"),
+        originalConfig
+      );
+      assert.deepEqual(await fs.readdir(sourceDirectory), before);
+      await fs.access(path.join(mediaSource, "asset.dat"));
+      await assert.rejects(
+        fs.access(path.join(rootDir, "content", "documents")),
+        (error) => error.code === "ENOENT"
+      );
+      await assert.rejects(
+        fs.access(path.join(rootDir, "content", "media", "documents")),
+        (error) => error.code === "ENOENT"
+      );
+      await assert.rejects(
+        fs.access(path.join(rootDir, TRANSACTION_ROOT_NAME)),
+        (error) => error.code === "ENOENT"
+      );
+    });
+  }
+});
+
+test("rejects linked media namespaces before moving records or configuration", async (t) => {
+  await withServer(async (baseUrl, rootDir) => {
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "minicms-media-link-"));
+    t.after(() => fs.rm(outside, { recursive: true, force: true }));
+    await fs.writeFile(path.join(outside, "sentinel.txt"), "keep");
+    await fs.mkdir(path.join(rootDir, "content", "media"), { recursive: true });
+    try {
+      await fs.symlink(outside, path.join(rootDir, "content", "media", "pages"));
+    } catch (error) {
+      if (["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) {
+        t.diagnostic(`symlink assertion skipped: ${error.code}`);
+        return;
+      }
+      throw error;
+    }
+    const loaded = await fetch(`${baseUrl}/api/config`);
+    const next = await loaded.json();
+    const originalConfig = await fs.readFile(
+      path.join(rootDir, "cms.config.yml"),
+      "utf8"
+    );
+    next.collections.documents = next.collections.pages;
+    delete next.collections.pages;
+    next.collections.documents.folder = "content/documents";
+
+    const rejected = await putConfig(
+      baseUrl,
+      next,
+      loaded.headers.get("etag"),
+      {
+        node_types: {},
+        collections: { pages: "documents" }
+      }
+    );
+    assert.equal(rejected.status, 400);
+    assert.equal(
+      await fs.readFile(path.join(rootDir, "cms.config.yml"), "utf8"),
+      originalConfig
+    );
+    await fs.access(path.join(rootDir, "content", "pages", "home.yml"));
+    assert.equal(await fs.readFile(path.join(outside, "sentinel.txt"), "utf8"), "keep");
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "documents")),
+      (error) => error.code === "ENOENT"
+    );
+    await assert.rejects(
+      fs.access(path.join(rootDir, TRANSACTION_ROOT_NAME)),
+      (error) => error.code === "ENOENT"
     );
   });
 });
@@ -516,16 +1513,18 @@ test("recovers copy-first folder transactions from either config side", async ()
       await fs.writeFile(
         path.join(transactionDir, "manifest.json"),
         `${JSON.stringify({
-          version: 1,
+          version: 2,
           oldConfigHash: sha256(oldSource),
           newConfigHash: sha256(newSource),
-          moves: [
+          directories: [
             {
-              collection: "pages",
+              kind: "collection",
+              label: "collection:pages->pages",
+              mode: "copy",
               source: "content/pages",
               destination: "content/recovered",
               stage: "stage/0",
-              sourceExists: true
+              backup: "backup/0"
             }
           ]
         })}\n`,
@@ -556,6 +1555,247 @@ test("recovers copy-first folder transactions from either config side", async ()
     } finally {
       await fs.rm(rootDir, { recursive: true, force: true });
     }
+  }
+});
+
+test("recovers in-place record rewrites before, during, and after the config commit", async () => {
+  const phases = [
+    { name: "source evacuated", published: false, committed: false },
+    { name: "rewrite published", published: true, committed: false },
+    { name: "config committed", published: true, committed: true }
+  ];
+  for (const phase of phases) {
+    const rootDir = await makeFixture();
+    try {
+      const configFile = path.join(rootDir, "cms.config.yml");
+      const oldSource = await fs.readFile(configFile, "utf8");
+      const newSource = oldSource.replace(
+        "site:\n",
+        "site:\n  name: Recovered schema\n"
+      );
+      const pages = path.join(rootDir, "content", "pages");
+      const oldMedia = path.join(rootDir, "content", "media", "pages");
+      const newMedia = path.join(rootDir, "content", "media", "documents");
+      const transactionDir = path.join(
+        rootDir,
+        TRANSACTION_ROOT_NAME,
+        "b".repeat(24)
+      );
+      await fs.mkdir(path.join(transactionDir, "backup"), { recursive: true });
+      await fs.mkdir(path.join(transactionDir, "stage"));
+      await fs.mkdir(path.join(oldMedia, "hash"), { recursive: true });
+      await fs.writeFile(path.join(oldMedia, "hash", "asset.dat"), "media");
+      await fs.rename(pages, path.join(transactionDir, "backup", "0"));
+      if (phase.published) {
+        await fs.cp(
+          path.join(transactionDir, "backup", "0"),
+          pages,
+          { recursive: true }
+        );
+        const recordPath = path.join(pages, "home.yml");
+        const source = await fs.readFile(recordPath, "utf8");
+        await fs.writeFile(
+          recordPath,
+          source.replace("title: Home", "title: Migrated")
+        );
+        await fs.cp(oldMedia, newMedia, { recursive: true });
+      }
+      await fs.writeFile(
+        path.join(transactionDir, "manifest.json"),
+        `${JSON.stringify({
+          version: 2,
+          oldConfigHash: sha256(oldSource),
+          newConfigHash: sha256(newSource),
+          directories: [
+            {
+              kind: "collection",
+              label: "collection:pages->pages",
+              mode: "replace",
+              source: "content/pages",
+              destination: "content/pages",
+              stage: "stage/0",
+              backup: "backup/0"
+            },
+            {
+              kind: "media",
+              label: "media:pages->documents",
+              mode: "copy",
+              source: "content/media/pages",
+              destination: "content/media/documents",
+              stage: "stage/1",
+              backup: "backup/1"
+            }
+          ]
+        })}\n`,
+        "utf8"
+      );
+      if (phase.committed) await fs.writeFile(configFile, newSource, "utf8");
+
+      await createConfigTransaction({ rootDir, configFile }).recover();
+      const recovered = await fs.readFile(
+        path.join(rootDir, "content", "pages", "home.yml"),
+        "utf8"
+      );
+      if (phase.committed) {
+        assert.match(recovered, /title: Migrated/, phase.name);
+        assert.equal(await fs.readFile(configFile, "utf8"), newSource);
+        await assert.rejects(
+          fs.access(oldMedia),
+          (error) => error.code === "ENOENT"
+        );
+        assert.equal(
+          await fs.readFile(path.join(newMedia, "hash", "asset.dat"), "utf8"),
+          "media"
+        );
+      } else {
+        assert.match(recovered, /title: Home/, phase.name);
+        assert.equal(await fs.readFile(configFile, "utf8"), oldSource);
+        assert.equal(
+          await fs.readFile(path.join(oldMedia, "hash", "asset.dat"), "utf8"),
+          "media"
+        );
+        await assert.rejects(
+          fs.access(newMedia),
+          (error) => error.code === "ENOENT"
+        );
+      }
+      await assert.rejects(
+        fs.access(transactionDir),
+        (error) => error.code === "ENOENT"
+      );
+    } finally {
+      await fs.rm(rootDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("recovery fails closed when a content-path ancestor became a symlink", async (t) => {
+  const rootDir = await makeFixture();
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), "minicms-recovery-link-"));
+  try {
+    const configFile = path.join(rootDir, "cms.config.yml");
+    const source = await fs.readFile(configFile, "utf8");
+    const transactionDir = path.join(
+      rootDir,
+      TRANSACTION_ROOT_NAME,
+      "c".repeat(24)
+    );
+    await fs.mkdir(path.join(transactionDir, "stage"), { recursive: true });
+    await fs.mkdir(path.join(transactionDir, "backup"));
+    await fs.mkdir(path.join(outside, "documents"));
+    await fs.writeFile(
+      path.join(outside, "documents", "sentinel.txt"),
+      "do not remove"
+    );
+    await fs.writeFile(
+      path.join(transactionDir, "manifest.json"),
+      `${JSON.stringify({
+        version: 2,
+        oldConfigHash: sha256(source),
+        newConfigHash: sha256(`${source}\n# next\n`),
+        directories: [
+          {
+            kind: "media",
+            label: "media:pages->documents",
+            mode: "copy",
+            source: "content/media/pages",
+            destination: "content/media/documents",
+            stage: "stage/0",
+            backup: "backup/0"
+          }
+        ]
+      })}\n`,
+      "utf8"
+    );
+    await fs.mkdir(path.join(rootDir, "content", "media"));
+    await fs.rename(
+      path.join(rootDir, "content", "media"),
+      path.join(rootDir, "content", "media-original")
+    );
+    try {
+      await fs.symlink(outside, path.join(rootDir, "content", "media"));
+    } catch (error) {
+      if (["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) {
+        t.diagnostic(`symlink assertion skipped: ${error.code}`);
+        return;
+      }
+      throw error;
+    }
+
+    await assert.rejects(
+      createConfigTransaction({ rootDir, configFile }).recover(),
+      /symlink or non-directory component/
+    );
+    assert.equal(
+      await fs.readFile(
+        path.join(outside, "documents", "sentinel.txt"),
+        "utf8"
+      ),
+      "do not remove"
+    );
+    await fs.access(transactionDir);
+  } finally {
+    await fs.rm(rootDir, { recursive: true, force: true });
+    await fs.rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("recovery fails closed when its backup root became a symlink", async (t) => {
+  const rootDir = await makeFixture();
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), "minicms-backup-link-"));
+  try {
+    const configFile = path.join(rootDir, "cms.config.yml");
+    const source = await fs.readFile(configFile, "utf8");
+    const transactionDir = path.join(
+      rootDir,
+      TRANSACTION_ROOT_NAME,
+      "d".repeat(24)
+    );
+    await fs.mkdir(path.join(transactionDir, "stage"), { recursive: true });
+    await fs.writeFile(path.join(outside, "sentinel.txt"), "do not remove");
+    try {
+      await fs.symlink(outside, path.join(transactionDir, "backup"));
+    } catch (error) {
+      if (["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) {
+        t.diagnostic(`symlink assertion skipped: ${error.code}`);
+        return;
+      }
+      throw error;
+    }
+    await fs.writeFile(
+      path.join(transactionDir, "manifest.json"),
+      `${JSON.stringify({
+        version: 2,
+        oldConfigHash: sha256(source),
+        newConfigHash: sha256(`${source}\n# next\n`),
+        directories: [
+          {
+            kind: "collection",
+            label: "collection:pages->pages",
+            mode: "replace",
+            source: "content/pages",
+            destination: "content/pages",
+            stage: "stage/0",
+            backup: "backup/0"
+          }
+        ]
+      })}\n`,
+      "utf8"
+    );
+
+    await assert.rejects(
+      createConfigTransaction({ rootDir, configFile }).recover(),
+      /backup root is not a regular directory/
+    );
+    assert.equal(
+      await fs.readFile(path.join(outside, "sentinel.txt"), "utf8"),
+      "do not remove"
+    );
+    await fs.access(path.join(rootDir, "content", "pages", "home.yml"));
+    await fs.access(transactionDir);
+  } finally {
+    await fs.rm(rootDir, { recursive: true, force: true });
+    await fs.rm(outside, { recursive: true, force: true });
   }
 });
 
@@ -793,17 +2033,8 @@ test("publishes concurrent first uploads after racing to create the media root",
 
 test("development mirrors GitHub media layout and requires a duplicate choice", async () => {
   await withServer(async (baseUrl, rootDir) => {
-    const configResponse = await fetch(`${baseUrl}/api/config`);
-    const config = await configResponse.json();
-    config.connectors.default = {
-      name: "github",
-      repo: "signalwerk/example",
-      base_url: "https://auth.example.com",
-      branch: "main"
-    };
-    assert.equal(
-      (await putConfig(baseUrl, config, configResponse.headers.get("etag"))).status,
-      200
+    const config = await fetch(`${baseUrl}/api/config`).then((response) =>
+      response.json()
     );
     const body = await sharp({
       create: {
@@ -894,23 +2125,11 @@ test("development mirrors GitHub media layout and requires a duplicate choice", 
       (await fs.readdir(path.join(rootDir, "content", "media", hash))).sort(),
       ["Hero Image-2.png", "Hero Image.png"]
     );
-  });
+  }, { prepareRoot: useGithubStorage });
 });
 
 test("GitHub duplicate choices reject decomposed existing filenames", async () => {
   await withServer(async (baseUrl, rootDir) => {
-    const configResponse = await fetch(`${baseUrl}/api/config`);
-    const config = await configResponse.json();
-    config.connectors.default = {
-      name: "github",
-      repo: "signalwerk/example",
-      base_url: "https://auth.example.com",
-      branch: "main"
-    };
-    assert.equal(
-      (await putConfig(baseUrl, config, configResponse.headers.get("etag"))).status,
-      200
-    );
     const body = await sharp({
       create: {
         width: 2,
@@ -940,7 +2159,7 @@ test("GitHub duplicate choices reject decomposed existing filenames", async () =
       assert.match((await response.json()).message, /not NFC-normalized/);
     }
     assert.deepEqual(await fs.readdir(directory), ["Cafe\u0301.png"]);
-  });
+  }, { prepareRoot: useGithubStorage });
 });
 
 test("refuses a pre-existing API asset whose bytes do not match its hash directory", async () => {

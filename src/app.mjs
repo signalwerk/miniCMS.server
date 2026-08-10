@@ -68,6 +68,47 @@ function httpError(status, message) {
   return error;
 }
 
+function isMapping(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function configSaveEnvelope(value) {
+  if (!isMapping(value)) {
+    throw httpError(400, "The configuration save body must be a mapping.");
+  }
+  const keys = Object.keys(value);
+  if (
+    keys.length !== 2 ||
+    !Object.hasOwn(value, "config") ||
+    !Object.hasOwn(value, "schema_renames")
+  ) {
+    throw httpError(
+      400,
+      "The configuration save body must contain exactly config and schema_renames."
+    );
+  }
+  if (!isMapping(value.config) || !isMapping(value.schema_renames)) {
+    throw httpError(
+      400,
+      "config and schema_renames must each be mappings."
+    );
+  }
+  const renameKeys = Object.keys(value.schema_renames);
+  if (
+    renameKeys.length !== 2 ||
+    !Object.hasOwn(value.schema_renames, "node_types") ||
+    !Object.hasOwn(value.schema_renames, "collections") ||
+    !isMapping(value.schema_renames.node_types) ||
+    !isMapping(value.schema_renames.collections)
+  ) {
+    throw httpError(
+      400,
+      "schema_renames must contain exactly node_types and collections mappings."
+    );
+  }
+  return value;
+}
+
 async function validateUploadedImage(filePath, filename, acceptedTypes) {
   const detected = await detectImageFileType(filePath);
   if (detected.kind === "unsupported") {
@@ -419,7 +460,8 @@ export function createApp({
 
   app.put("/api/config", projectWrite(async (request, response, next) => {
     try {
-      const config = validateSharedConfig(request.body, 400);
+      const envelope = configSaveEnvelope(request.body);
+      const config = validateSharedConfig(envelope.config, 400);
       await ensureTransactionRecovery();
       imageService.validateProjectConfiguration(config, 400);
       const mediaFolder = path.resolve(
@@ -452,15 +494,21 @@ export function createApp({
           );
         }
       }
-      const etag = await configTransaction.save(
+      const {
+        etag,
+        renamedConcreteCollections,
+        schemaRenames
+      } = await configTransaction.save({
         config,
-        request.headers["if-match"]
-      );
+        schemaRenames: envelope.schema_renames,
+        expectedEtag: request.headers["if-match"]
+      });
       const stat = await fs.stat(configFile);
       cachedConfig = config;
       cachedConfigMtime = stat.mtimeMs;
+      await imageService.removeCollectionCaches(renamedConcreteCollections);
       response.set("etag", etag);
-      response.json({ saved: true, config });
+      response.json({ saved: true, config, schema_renames: schemaRenames });
     } catch (error) {
       next(error);
     }

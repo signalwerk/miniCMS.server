@@ -354,8 +354,8 @@ Authenticated production routes:
 - `POST /api/collections/:collection/:record/rename`
 - `POST /api/media/:collection?filename=<name>&widget=<image|file>[&duplicate=reuse|copy]`
 
-Configuration writes use optimistic concurrency while keeping the raw complete
-configuration as their body:
+Configuration writes use optimistic concurrency and an explicit schema-migration
+envelope:
 
 ```http
 GET /api/config
@@ -365,16 +365,43 @@ PUT /api/config
 Content-Type: application/json
 If-Match: "<etag-from-get>"
 
-{ "connectors": {}, "site": {}, "node_types": {}, "collections": {} }
+{
+  "config": {
+    "connectors": {},
+    "site": {},
+    "node_types": {},
+    "collections": {}
+  },
+  "schema_renames": {
+    "node_types": { "old_type": "new_type" },
+    "collections": { "old_collection": "new_collection" }
+  }
+}
 ```
 
 Missing and stale preconditions return `428` and `412`. When the folder of a
 same-key local collection changes, that PUT copies its existing folder to the
-absent destination, atomically commits `cms.config.yml`, and then removes only
-the old folder. An interrupted transaction is recovered from the service-owned
-`.minicms-config-transactions` journal before content is served. Remote aliases
-never touch local folders. A newly configured local collection whose folder
-does not yet exist lists as empty; the first record write creates the folder.
+absent destination. Explicit one-to-one key renames additionally rewrite root
+and nested record types, canonical inline references, and canonical API file
+URLs. Concrete collection renames move the target-configured content folder and
+`content/media/<collection>` namespace; structured image values stay unchanged.
+Changing a continuing collection between `yml` and `yaml` migrates every record
+filename and rejects occupied destination paths.
+GitHub-development media keeps its global hash namespace during collection
+renames. Configuration saves cannot change between API and GitHub media storage
+layouts or change `site.media_folder`; either requires a separate offline
+migration.
+Remote-alias renames preserve their connector identity and never move remote
+storage. Every affected source record, filename, destination, and resulting
+record is preflighted before the first write. The transaction then atomically
+commits `cms.config.yml` and removes only the old folders or journal backups.
+An interrupted transaction is recovered from the service-owned
+`.minicms-config-transactions` journal before content is served. A newly
+configured local collection must have an absent physical content folder and
+media namespace; with those paths absent, it lists as empty until the first
+record write.
+Derived cache namespaces for renamed concrete collections are removed safely
+and best-effort only after the config transaction commits.
 The journal recovers interrupted service processes; it does not claim
 fsync-backed durability across a host or storage power failure.
 The service must be the only runtime writer of the mounted configuration and

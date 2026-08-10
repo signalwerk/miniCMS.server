@@ -20,7 +20,8 @@ same change unless backward compatibility is explicitly requested.
 - `src/config.mjs` is the fail-closed environment and command configuration
   boundary.
 - `src/config-transaction.mjs` owns strong config revisions and copy-first,
-  journaled local collection-folder moves. `src/project-gate.mjs` prevents
+  journaled local schema-key migrations, collection-folder moves, API media
+  namespace moves, and complete-record rewrites. `src/project-gate.mjs` prevents
   config transactions from interleaving with authenticated collection reads,
   CRUD, and uploads. Gate ownership follows the async route operation, not the
   response socket lifetime; a disconnected request must retain its lock until
@@ -99,7 +100,8 @@ same change unless backward compatibility is explicitly requested.
   route SHA-256 before raw, metadata, SVG, cache-hit, or generated delivery;
   memoization must be bounded and invalidated by the file-stat signature. Raw
   responses stream the already-open verified file descriptor so a later path
-  replacement cannot select unverified bytes. SVG is exact passthrough and must
+  replacement cannot select unverified bytes, and every conditional, range,
+  HEAD, success, and failure exit closes it. SVG is exact passthrough and must
   never reach Sharp.
 - Source hashing and Sharp processing share a bounded service queue. Sharp
   always uses finite input/output/channel/timeout bounds. Project dimensions
@@ -145,8 +147,10 @@ same change unless backward compatibility is explicitly requested.
 - Production project roots must use durable writable storage. The service does
   not synchronize filesystem edits back to GitHub.
 - `GET /api/config` exposes a strong ETag over the exact source bytes;
-  `PUT /api/config` keeps the raw complete-config body and requires that ETag
-  in `If-Match`. Missing and stale preconditions return 428 and 412. CORS must
+  `PUT /api/config` accepts exactly `{config, schema_renames}`, where
+  `schema_renames` contains exact `node_types` and `collections` old-to-new
+  mappings, and requires that ETag in `If-Match`. Missing and stale
+  preconditions return 428 and 412. CORS must
   allow `If-Match` and expose `ETag`. The returned config and ETag must come
   from one exact source snapshot so an external replacement cannot pair a
   stale body with a newer revision.
@@ -158,12 +162,31 @@ same change unless backward compatibility is explicitly requested.
   that did not move. The destination must be absent. Remote aliases never
   participate, swaps/chains are rejected, and a missing source represents an
   empty collection without creating a placeholder directory.
-- Folder moves copy regular directories and files into the exact service-owned
-  `.minicms-config-transactions` namespace, publish complete copies to absent
-  destinations, atomically replace config as the commit point, and only then
-  remove exact old source directories. Never prune parent directories. The
-  journal recovers old-config state by removing copies and new-config state by
-  removing old sources; an unknown config hash fails readiness closed. This is
+- Schema key renames are explicit, one-to-one, and cannot collide, chain, swap,
+  or change ownership. Alias renames preserve connector/remote identity and
+  rewrite local canonical references without moving connector-owned storage.
+  Concrete collection renames migrate their configured content folder and API
+  media namespace. GitHub-development media remains in its global hash layout.
+  Configuration saves may not switch API/GitHub media storage mode; that needs
+  a separate offline migration. They likewise cannot change
+  `site.media_folder` online. Every surviving local record is validated against its
+  current schema and filename, recursively migrated through the shared core,
+  and validated against the next schema before the first filesystem write.
+  A continuing collection may change between `yml` and `yaml`; the transaction
+  renames every top-level record to the next extension and rejects any existing
+  file or directory at a planned destination instead of adopting hidden data.
+  Structured image identities remain unchanged; exact canonical API file URLs
+  receive the renamed collection segment.
+- Folder and schema moves copy regular directories and files into the exact
+  service-owned `.minicms-config-transactions` namespace, publish complete
+  copies or swap staged rewrites against journaled backups, atomically replace
+  config as the commit point, and only then remove exact old sources. New
+  concrete collections may not adopt any existing physical folder or media
+  namespace. Never prune parent directories. The journal recovers old-config
+  state by removing copies/restoring backups and new-config state by removing
+  old sources/backups; an unknown config hash fails readiness closed. Derived
+  cache cleanup for renamed concrete collections runs safely and best-effort
+  only after commit. This is
   process-crash recovery; the service does not claim fsync-backed host
   power-loss durability.
 - Each service owns exactly one project root and never proxies connector

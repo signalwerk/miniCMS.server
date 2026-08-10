@@ -107,6 +107,8 @@ async function sendFileResult(request, response, next, result, contentType) {
   } catch (error) {
     if (response.headersSent) response.destroy(error);
     else next(error);
+  } finally {
+    await closeResultFile(result);
   }
 }
 
@@ -241,6 +243,8 @@ async function sendRawResult(
   } catch (error) {
     if (response.headersSent) response.destroy(error);
     else next(error);
+  } finally {
+    await closeResultFile(result);
   }
 }
 

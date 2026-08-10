@@ -285,7 +285,10 @@ async function putConfig(baseUrl, config) {
       "content-type": "application/json",
       "if-match": current.headers.get("etag")
     },
-    body: JSON.stringify(config)
+    body: JSON.stringify({
+      config,
+      schema_renames: { node_types: {}, collections: {} }
+    })
   });
 }
 
