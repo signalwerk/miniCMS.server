@@ -2150,8 +2150,11 @@ test("development mirrors GitHub media layout and requires a duplicate choice", 
       storage_path: `content/media/${hash}/Hero Image.png`,
       reused: false
     });
-    const raw = await fetch(`${baseUrl}/media/${hash}/Anything%20Readable.jpg`);
+    const raw = await fetch(`${baseUrl}/media/${hash}/Anything%20Readable.jpg`, {
+      headers: { origin: "http://127.0.0.1:4321" }
+    });
     assert.equal(raw.status, 200);
+    assert.equal(raw.headers.get("access-control-allow-origin"), "*");
     assert.deepEqual(Buffer.from(await raw.arrayBuffer()), body);
     const derivative = imageServicePath(
       { hash, filename: "Hero Image.png" },

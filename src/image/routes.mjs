@@ -115,6 +115,9 @@ async function sendFileResult(request, response, next, result, contentType) {
 function rawSecurityHeaders(response, result, contentType, filename) {
   response.type(contentType);
   response.set({
+    "access-control-allow-origin": "*",
+    "access-control-expose-headers":
+      "Accept-Ranges, Content-Length, Content-Range, ETag",
     "cache-control": "public, max-age=0, must-revalidate",
     "cross-origin-resource-policy": "cross-origin",
     "x-content-type-options": "nosniff",

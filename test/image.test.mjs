@@ -1077,15 +1077,23 @@ test("passes SVG through byte-for-byte, exposes safe dimensions, and never raste
 
 test("serves configured raw media safely and rejects symbolic links", async (t) => {
   await withServer(async ({ baseUrl, mediaDir, rootDir, config, media }) => {
-    const raw = await fetch(`${baseUrl}${media.photo.source}`);
+    const raw = await fetch(`${baseUrl}${media.photo.source}`, {
+      headers: { origin: "http://127.0.0.1:4321" }
+    });
     assert.equal(raw.status, 200);
     assert.equal(raw.headers.get("x-minicms-image-cache"), "raw");
     assert.equal(raw.headers.get("content-type"), "image/jpeg");
+    assert.equal(raw.headers.get("access-control-allow-origin"), "*");
+    assert.equal(
+      raw.headers.get("access-control-expose-headers"),
+      "Accept-Ranges, Content-Length, Content-Range, ETag"
+    );
 
     const range = await fetch(`${baseUrl}${media.photo.source}`, {
       headers: { range: "bytes=0-9" }
     });
     assert.equal(range.status, 206);
+    assert.equal(range.headers.get("access-control-allow-origin"), "*");
     assert.match(range.headers.get("content-range"), /^bytes 0-9\//);
     assert.equal((await range.arrayBuffer()).byteLength, 10);
 
