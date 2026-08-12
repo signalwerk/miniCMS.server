@@ -14,7 +14,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "@signalwerk/minicms": "https://github.com/signalwerk/miniCMS/archive/be2cf286fe82d696e3a922699a2112a262b8f7b3.tar.gz",
+    "@signalwerk/minicms": "https://github.com/signalwerk/miniCMS/archive/50b10f22ecdefb49dd489f6183cdef2796e4b747.tar.gz",
     "express": "^5.1.0",
     "mime-types": "^3.0.1",
     "sharp": "^0.35.3"
