@@ -47,7 +47,10 @@ same change unless backward compatibility is explicitly requested.
   `@signalwerk/minicms/core/content`, `/core/connectors`, `/core/media`,
   `/core/slug`, and `/core/image-service`. Service configuration is a source
   manifest and must use `validateSourceConfig`; it never materializes or
-  proxies remote aliases.
+  proxies remote aliases. The shared validator owns ordered slot-default
+  templates and slot minimum/maximum record invariants; keep the immutable core
+  pin current so API config and record writes enforce the same schema as the
+  browser editor.
 - This standalone repository pins `@signalwerk/minicms` to an immutable public
   GitHub archive. Publish the required miniCMS commit before updating that pin,
   and regenerate `package-lock.json`; do not restore a sibling `file:`

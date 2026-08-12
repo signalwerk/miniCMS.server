@@ -253,6 +253,91 @@ test("validates and atomically saves the guided configuration", async () => {
   });
 });
 
+test("enforces slot defaults and minimums at the API persistence boundary", async () => {
+  await withServer(async (baseUrl, rootDir) => {
+    const loaded = await fetch(`${baseUrl}/api/config`);
+    const config = await loaded.json();
+    config.node_types.title = {
+      kind: "content",
+      fields: {
+        title: { widget: "string" },
+        element: { widget: "select", options: ["none", "h2"] }
+      }
+    };
+    config.node_types.accordion = {
+      kind: "content",
+      fields: {},
+      slots: {
+        summary: {
+          allowed_types: ["title"],
+          min: 1,
+          max: 1,
+          default: [{ type: "title", properties: { element: "none" } }]
+        }
+      }
+    };
+    config.node_types.page.slots.content.allowed_types.push("accordion");
+
+    const saved = await putConfig(
+      baseUrl,
+      config,
+      loaded.headers.get("etag")
+    );
+    assert.equal(saved.status, 200);
+    const savedBody = await saved.json();
+    assert.deepEqual(
+      savedBody.config.node_types.accordion.slots.summary.default,
+      [{ type: "title", properties: { element: "none" } }]
+    );
+    assert.match(
+      await fs.readFile(path.join(rootDir, "cms.config.yml"), "utf8"),
+      /default:\n\s+- type: title/
+    );
+
+    const invalidDefault = structuredClone(savedBody.config);
+    invalidDefault.node_types.accordion.slots.summary.default[0]
+      .properties.element = "missing";
+    const rejectedDefault = await putConfig(
+      baseUrl,
+      invalidDefault,
+      saved.headers.get("etag")
+    );
+    assert.equal(rejectedDefault.status, 400);
+    assert.match(
+      (await rejectedDefault.json()).message,
+      /invalid select value/
+    );
+
+    const rejectedMinimum = await fetch(`${baseUrl}/api/collections/pages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "invalid-accordion",
+        type: "page",
+        order: 1,
+        properties: {
+          uuid: "3276e4b0-fc0d-4fbc-931d-63c9ac5a381f",
+          parent_uuid: null,
+          title: "Invalid accordion"
+        },
+        slots: {
+          content: [{
+            id: "accordion-node",
+            type: "accordion",
+            properties: {},
+            slots: { summary: [] }
+          }]
+        }
+      })
+    });
+    assert.equal(rejectedMinimum.status, 400);
+    assert.match(
+      (await rejectedMinimum.json()).message,
+      /Slot "summary" requires at least 1 items/
+    );
+  });
+});
+
 test("requires the current config ETag before saving", async () => {
   await withServer(async (baseUrl, rootDir) => {
     const loaded = await fetch(`${baseUrl}/api/config`);
