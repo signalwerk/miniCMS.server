@@ -582,7 +582,26 @@ test("transactionally renames concrete schema keys, records, media, and cache na
   await withServer(async (baseUrl, rootDir) => {
     const loaded = await fetch(`${baseUrl}/api/config`);
     const current = await loaded.json();
-    const etag = loaded.headers.get("etag");
+    current.node_types.page.fields.link = {
+      widget: "url",
+      internal_links: { collections: ["pages"] }
+    };
+    current.node_types.page.fields.literal = { widget: "string" };
+    current.node_types.text.fields.text = {
+      widget: "markdown",
+      blocknote: {
+        inline_reference: { collection: "pages" },
+        internal_links: { collections: ["pages"] }
+      }
+    };
+    const prepared = await putConfig(
+      baseUrl,
+      current,
+      loaded.headers.get("etag")
+    );
+    const preparedBody = await prepared.text();
+    assert.equal(prepared.status, 200, preparedBody);
+    const etag = prepared.headers.get("etag");
     const imageBytes = Buffer.from("schema-rename-image");
     const imageHash = sha256(imageBytes);
     const fileHash = sha256("schema-rename-file");
@@ -602,13 +621,15 @@ properties:
   image:
     hash: ${imageHash}
     filename: Original image.png
+  link: minicms://link/pages/home
+  literal: minicms://link/pages/home
 slots:
   content:
     - id: abcdefghijklmno
       type: text
       order: 0
       properties:
-        text: '[Page](minicms://reference/pages/home)'
+        text: '[Reference](minicms://reference/pages/home) [Link](minicms://link/pages/home)'
       slots: {}
 `,
       "utf8"
@@ -661,6 +682,13 @@ slots: {}
     next.node_types.rich_text = next.node_types.text;
     delete next.node_types.text;
     next.node_types.article.slots.content.allowed_types = ["rich_text"];
+    next.node_types.article.fields.link.internal_links.collections = [
+      "documents"
+    ];
+    next.node_types.rich_text.fields.text.blocknote.inline_reference.collection =
+      "documents";
+    next.node_types.rich_text.fields.text.blocknote.internal_links.collections =
+      ["documents"];
     next.collections.documents = next.collections.pages;
     delete next.collections.pages;
     next.collections.documents.folder = "content/documents";
@@ -691,7 +719,15 @@ slots: {}
     assert.equal(migratedPage.slots.content[0].type, "rich_text");
     assert.equal(
       migratedPage.slots.content[0].properties.text,
-      "[Page](minicms://reference/documents/home)"
+      "[Reference](minicms://reference/documents/home) [Link](minicms://link/documents/home)"
+    );
+    assert.equal(
+      migratedPage.properties.link,
+      "minicms://link/documents/home"
+    );
+    assert.equal(
+      migratedPage.properties.literal,
+      "minicms://link/pages/home"
     );
     assert.deepEqual(migratedPage.properties.image, structuredImage);
     assert.equal(
@@ -831,6 +867,12 @@ test("renames remote aliases in local records without moving connector-owned sto
       connector: "central",
       remote_collection: "sources"
     };
+    current.node_types.text.fields.text = {
+      widget: "markdown",
+      blocknote: {
+        inline_reference: { collection: "central_sources" }
+      }
+    };
     const prepared = await putConfig(
       baseUrl,
       current,
@@ -875,6 +917,8 @@ slots:
     const next = structuredClone(current);
     next.collections.library_sources = next.collections.central_sources;
     delete next.collections.central_sources;
+    next.node_types.text.fields.text.blocknote.inline_reference.collection =
+      "library_sources";
     const renamed = await putConfig(
       baseUrl,
       next,

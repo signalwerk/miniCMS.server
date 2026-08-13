@@ -105,7 +105,9 @@ same change unless backward compatibility is explicitly requested.
   responses stream the already-open verified file descriptor so a later path
   replacement cannot select unverified bytes, and every conditional, range,
   HEAD, success, and failure exit closes it. SVG is exact passthrough and must
-  never reach Sharp.
+  never reach Sharp. Tests that inspect that descriptor after consuming a tiny
+  loopback response must first await its `close` event; client body completion
+  can precede route-pipeline cleanup by one event-loop turn.
 - Source hashing and Sharp processing share a bounded service queue. Sharp
   always uses finite input/output/channel/timeout bounds. Project dimensions
   are URL-builder defaults; only deployment
@@ -179,7 +181,11 @@ same change unless backward compatibility is explicitly requested.
   renames every top-level record to the next extension and rejects any existing
   file or directory at a planned destination instead of adopting hidden data.
   Structured image identities remain unchanged; exact canonical API file URLs
-  receive the renamed collection segment.
+  receive the renamed collection segment. Configured URL widgets likewise
+  rewrite an exact standalone `minicms://link/<collection>/<value>` when that
+  collection is renamed, while ordinary string fields remain byte-for-byte
+  unchanged; configured Markdown destinations continue to rewrite both
+  `minicms://reference/` and `minicms://link/` collection names.
 - Folder and schema moves copy regular directories and files into the exact
   service-owned `.minicms-config-transactions` namespace, publish complete
   copies or swap staged rewrites against journaled backups, atomically replace

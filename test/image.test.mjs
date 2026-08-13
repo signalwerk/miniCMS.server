@@ -1176,6 +1176,7 @@ test("raw delivery keeps streaming the verified open file after a path swap", as
   const sourcePath = path.join(rootDir, "asset.dat");
   const displacedPath = path.join(rootDir, "verified.dat");
   let openedHandle;
+  let openedHandleClosed;
   await fs.writeFile(sourcePath, original);
   const config = {
     connectors: { default: { name: "api" } },
@@ -1186,6 +1187,9 @@ test("raw delivery keeps streaming the verified open file after a path swap", as
       const stat = await fs.stat(sourcePath);
       const fileHandle = await fs.open(sourcePath, "r");
       openedHandle = fileHandle;
+      openedHandleClosed = new Promise((resolve) => {
+        fileHandle.once("close", resolve);
+      });
       await fs.rename(sourcePath, displacedPath);
       await fs.writeFile(sourcePath, replacement);
       return {
@@ -1209,6 +1213,7 @@ test("raw delivery keeps streaming the verified open file after a path swap", as
     );
     assert.equal(response.status, 200);
     assert.deepEqual(Buffer.from(await response.arrayBuffer()), original);
+    await openedHandleClosed;
     await assert.rejects(
       openedHandle.stat(),
       (error) => error.code === "EBADF" || /closed/i.test(error.message)
