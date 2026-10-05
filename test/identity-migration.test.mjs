@@ -164,17 +164,23 @@ test("promotes generated identity fields, remaps readable ids, and moves media f
     "content/media"
   );
 
-  const home = await readYaml(root, "content", "pages", "home.yml");
-  const about = await readYaml(root, "content", "pages", "about.yml");
-  const ada = await readYaml(root, "content", "authors", "ada.yml");
-  const grace = await readYaml(root, "content", "authors", "grace.yml");
+  assert.deepEqual(
+    (await fs.readdir(path.join(root, "content", "pages"))).sort(),
+    ["about-aboutcontent01x.yml", "home-homecontentid01.yml"]
+  );
+  const authorFiles = await fs.readdir(path.join(root, "content", "authors"));
+  const authorFile = (name) => authorFiles.find((file) => file.startsWith(`${name}-`));
+  const home = await readYaml(root, "content", "pages", "home-homecontentid01.yml");
+  const about = await readYaml(root, "content", "pages", "about-aboutcontent01x.yml");
+  const ada = await readYaml(root, "content", "authors", authorFile("ada"));
+  const grace = await readYaml(root, "content", "authors", authorFile("grace"));
+  assert.equal(authorFile("ada"), `ada-${ada.id}.yml`);
+  assert.equal(Object.hasOwn(home, "filename"), false);
   assert.equal(home.id, "homecontentid01");
-  assert.equal(home.filename, "home");
   assert.equal(home.properties.content_id, undefined);
   assert.equal(about.id, "aboutcontent01x");
   assert.equal(about.properties.parent_id, "homecontentid01");
   assert.match(ada.id, ID_PATTERN);
-  assert.equal(ada.filename, "ada");
   assert.equal(home.properties.author, ada.id);
   assert.equal(
     home.properties.body,
@@ -194,9 +200,55 @@ test("promotes generated identity fields, remaps readable ids, and moves media f
     /^id: ada$/m
   );
 
+  await assert.rejects(
+    fs.access(path.join(root, "content", "pages", "home.yml"))
+  );
+
   const again = await buildPlan(root);
   assert.equal(again.configOutput, null);
   assert.equal(again.rewrites.length, 0);
+});
+
+test("moves stored filename records to <slug>-<id> and slug-less collections to <id>", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "minicms-identity-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, "content", "pages"), { recursive: true });
+  await fs.mkdir(path.join(root, "content", "images"), { recursive: true });
+  await fs.writeFile(
+    path.join(root, "cms.config.yml"),
+    `connectors:
+  default: { name: github, repo: signalwerk/example, base_url: https://auth.example.com, branch: main }
+site: {}
+node_types:
+  page: { fields: { title: { widget: string } } }
+  image: { fields: { file: { widget: image, media_folder: content/media } } }
+collections:
+  pages: { folder: content/pages, slug: "{{title}}", node_type: page }
+  images: { folder: content/images, node_type: image }
+`
+  );
+  await fs.writeFile(
+    path.join(root, "content", "pages", "about-2026-09.yml"),
+    "id: pageabout000001\nfilename: about-2026-09\ntype: page\norder: 0\nproperties:\n  title: About\nslots: {}\n"
+  );
+  await fs.writeFile(
+    path.join(root, "content", "images", "photo-2026-09.yml"),
+    "id: imagephoto00001\nfilename: photo-2026-09\ntype: image\norder: 0\nproperties:\n  file: \"\"\nslots: {}\n"
+  );
+  const backup = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "minicms-identity-backup-")), "run");
+  t.after(() => fs.rm(path.dirname(backup), { recursive: true, force: true }));
+  await executePlan(await buildPlan(root), backup);
+  assert.deepEqual(await fs.readdir(path.join(root, "content", "pages")), [
+    "about-2026-09-pageabout000001.yml"
+  ]);
+  assert.deepEqual(await fs.readdir(path.join(root, "content", "images")), [
+    "imagephoto00001.yml"
+  ]);
+  assert.doesNotMatch(
+    await fs.readFile(path.join(root, "content", "images", "imagephoto00001.yml"), "utf8"),
+    /filename/
+  );
+  assert.equal((await buildPlan(root)).rewrites.length, 0);
 });
 
 test("refuses slug templates that depend on the promoted identity field", async (t) => {

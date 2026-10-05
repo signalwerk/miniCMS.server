@@ -37,16 +37,18 @@ same change unless backward compatibility is explicitly requested.
   service or the always-authenticated production `start` service.
 - `bin/migrate-record-identity.mjs` is the explicit offline, preflight-first
   one-time migration from readable record ids, `content_id`-style identity
-  fields, and site-level media folders to opaque record `id` plus `filename`
-  and per-field `media_folder`. Run it only while the service is stopped;
+  fields, stored `filename` keys, and site-level media folders to opaque record
+  ids in `<slug>-<id>.yml` / `<id>.yml` files and per-field `media_folder`. Run it only while the service is stopped;
   `--write` requires a new backup directory outside the project. It validates
   every rewritten record against the next schema before writing and records
   the readable-id map in the backup. The superseded image-asset migration was
   removed after every volume adopted `{hash, filename}`.
-- Records are located by their opaque `id`: list, read, save, rename, and
-  delete scan the collection folder once, reject a stored `filename` that
-  differs from the file stem, and reject duplicate ids. Rename changes only the
-  `filename`. Record mutations (create/save/rename/delete) take the exclusive
+- Record files are named `<slug>-<id>.yml` from the collection slug template,
+  or `<id>.yml` without one (shared `recordFileStem`/`recordIdFromFileStem`).
+  Records are located by listing file names and matching the trailing id; only
+  the matching file is read. Files without a trailing id, files whose content
+  id differs, and duplicate ids are rejected. Create derives the name itself;
+  rename takes no body and re-renders only the slug part. Record mutations (create/save/rename/delete) take the exclusive
   project gate so a scan cannot race a concurrent move; uploads and reads stay
   shared. Uploads must name the field's `media_folder`; acceptance comes from
   the shared `uploadFieldAccept` helper.

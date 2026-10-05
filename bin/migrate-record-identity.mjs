@@ -13,13 +13,16 @@ import {
   validateSourceConfig
 } from "@signalwerk/minicms/core/connectors";
 import { ID_PATTERN, createId } from "@signalwerk/minicms/core/id";
+import { recordIdFromFileStem } from "@signalwerk/minicms/core/slug";
 
 // One-time offline migration to the opaque record identity and per-field
 // media folder contract:
 // - a collection's generated-ID identity field (hierarchy.id_field or
 //   views.reference.value) becomes the record `id`; otherwise records receive
 //   a fresh generated ID,
-// - the previous readable record id becomes `filename`, so no file moves,
+// - files are renamed to `<slug>-<id>` (the old readable name becomes the slug
+//   part) or `<id>` for collections without a slug template; records never
+//   keep a `filename` key,
 // - references, tags, hierarchy parents, and canonical minicms:// links that
 //   targeted a readable record id are rewritten to the new id,
 // - site.media_folder moves onto every local image/file field and
@@ -322,9 +325,18 @@ async function buildPlan(projectRoot) {
         throw migrationError(`${entry.filePath} is not a record mapping.`);
       }
       if (typeof record.filename === "string") {
+        // Intermediate contract: opaque id plus a stored filename key.
         if (record.filename !== entry.stem || !ID_PATTERN.test(record.id)) {
           throw migrationError(`${entry.filePath} is partially migrated.`);
         }
+        entry.state = "filename";
+      } else if (
+        ID_PATTERN.test(record.id) &&
+        recordIdFromFileStem(entry.stem) === record.id
+      ) {
+        entry.state = "current";
+      }
+      if (entry.state) {
         if (used.has(record.id)) {
           throw migrationError(`Collection "${name}" repeats id "${record.id}".`);
         }
@@ -347,7 +359,7 @@ async function buildPlan(projectRoot) {
       if (entry.nextId) used.add(entry.nextId);
     }
     for (const entry of records) {
-      if (typeof entry.record.filename === "string") continue;
+      if (entry.state) continue;
       entry.nextId ??= createId(used);
       if (!field) ids.set(entry.record.id, entry.nextId);
     }
@@ -363,12 +375,29 @@ async function buildPlan(projectRoot) {
     const ownIds = idMaps.get(name);
     for (const entry of records) {
       const record = structuredClone(entry.record);
-      const migrated = typeof record.filename === "string";
-      if (!migrated) {
+      // The readable part of the old name becomes the `<slug>` prefix.
+      let readableName;
+      if (entry.state === "filename") {
+        readableName = record.filename;
+        delete record.filename;
+      } else if (entry.state === "current") {
+        readableName = entry.stem === record.id
+          ? ""
+          : entry.stem.slice(0, -record.id.length - 1);
+      } else {
         if (field) delete record.properties?.[field];
-        record.filename = record.id;
+        readableName = record.id;
         record.id = entry.nextId;
       }
+      const stem = config.collections[name].slug &&
+        readableName &&
+        readableName !== record.id
+        ? `${readableName}-${record.id}`
+        : record.id;
+      const targetPath = path.join(
+        path.dirname(entry.filePath),
+        `${stem}${path.extname(entry.filePath)}`
+      );
       migrateNode(record, context);
       if (ownIds) {
         if (parentField && record.properties?.[parentField]) {
@@ -379,8 +408,7 @@ async function buildPlan(projectRoot) {
           record.parent = ownIds.get(record.parent) ?? record.parent;
         }
       }
-      const { id, filename, ...rest } = record;
-      const output = dumpYaml({ id, filename, ...rest });
+      const output = dumpYaml(record);
       try {
         validateRecord(
           parseYaml(output),
@@ -390,9 +418,24 @@ async function buildPlan(projectRoot) {
       } catch (error) {
         throw migrationError(`${entry.filePath}: ${error.message}`);
       }
-      if (output !== entry.source) {
-        rewrites.push({ filePath: entry.filePath, output, mode: entry.mode });
+      if (output !== entry.source || targetPath !== entry.filePath) {
+        rewrites.push({
+          filePath: entry.filePath,
+          targetPath,
+          output,
+          mode: entry.mode
+        });
       }
+    }
+  }
+  const targets = new Set();
+  for (const { filePath, targetPath } of rewrites) {
+    if (targets.has(targetPath)) {
+      throw migrationError(`Two records would be written to ${targetPath}.`);
+    }
+    targets.add(targetPath);
+    if (targetPath !== filePath && (await fs.lstat(targetPath).catch(() => null))) {
+      throw migrationError(`${targetPath} already exists.`);
     }
   }
   const configOutput = dumpYaml(config);
@@ -431,8 +474,9 @@ async function executePlan(plan, backupDir) {
     `${JSON.stringify(plan.remapped, null, 2)}\n`,
     { flag: "wx" }
   );
-  for (const { filePath, output, mode } of plan.rewrites) {
-    await writeAtomic(filePath, output, mode);
+  for (const { filePath, targetPath, output, mode } of plan.rewrites) {
+    await writeAtomic(targetPath, output, mode);
+    if (targetPath !== filePath) await fs.unlink(filePath);
   }
   if (plan.configOutput) {
     const { mode } = await fs.stat(plan.configPath);

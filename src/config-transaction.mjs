@@ -14,6 +14,7 @@ import {
   validateSourceConfig
 } from "@signalwerk/minicms/core/connectors";
 import { configuredMediaFolders } from "@signalwerk/minicms/core/media";
+import { recordIdFromFileStem } from "@signalwerk/minicms/core/slug";
 import { mediaStorageMode } from "./media-contract.mjs";
 
 const TRANSACTION_ROOT_NAME = ".minicms-config-transactions";
@@ -625,13 +626,14 @@ export function createConfigTransaction({ rootDir, configFile }) {
           );
         }
         record = parseYaml(await fs.readFile(filePath, "utf8"));
-        if (
-          path.basename(entry.relativePath, path.extname(entry.relativePath)) !==
-            record?.filename
-        ) {
+        const stem = path.basename(
+          entry.relativePath,
+          path.extname(entry.relativePath)
+        );
+        if (recordIdFromFileStem(stem) !== record?.id) {
           throw transactionError(
             400,
-            `Record "${sourceName}/${entry.relativePath}" contains filename "${record?.filename ?? ""}".`
+            `Record "${sourceName}/${entry.relativePath}" does not end with its id "${record?.id ?? ""}".`
           );
         }
         validateRecord(record, currentCollection, currentConfig, 400);
@@ -643,7 +645,7 @@ export function createConfigTransaction({ rootDir, configFile }) {
           { storage }
         );
         validateRecord(migrated, nextCollection, nextConfig, 400);
-        const nextRelativePath = `${record.filename}.${nextExtension}`;
+        const nextRelativePath = `${stem}.${nextExtension}`;
         if (
           nextRelativePath !== entry.relativePath &&
           occupiedPaths.has(nextRelativePath)

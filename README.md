@@ -199,9 +199,9 @@ the hash, and huge originals are never buffered into the Node.js heap.
 
 ### One-time record identity migration
 
-Records are `{id, filename, type, order, properties, slots}`: `id` is an
-opaque generated `[a-z0-9]{15}` identity and `filename` is the readable YAML
-filename stem. Every `image` and `file` field declares its own
+Records are `{id, type, order, properties, slots}`: `id` is an opaque
+generated `[a-z0-9]{15}` identity, and files are named `<slug>-<id>.yml` (or
+`<id>.yml` for collections without a slug template). Every `image` and `file` field declares its own
 `media_folder`; `site.media_folder` and `site.public_folder` are rejected.
 Before deploying this contract to an existing volume, stop the service and run
 a dry preflight, then the write with an absent backup directory outside the
@@ -217,7 +217,9 @@ node bin/migrate-record-identity.mjs --project-root /data --check
 A collection whose `hierarchy.id_field` or `views.reference.value` named a
 generated-ID field (for example `content_id`) promotes that value to the record
 `id` and drops the field from the schema; other records receive a fresh
-generated ID. The previous record id becomes `filename`, so no file moves.
+generated ID. Files are renamed to `<old readable name>-<id>.yml`, or
+`<id>.yml` in collections without a slug template, and a stored `filename`
+key is dropped.
 References, tags, hierarchy parents, and canonical `minicms://` destinations
 that pointed at readable ids are rewritten, `site.media_folder` moves onto
 every local upload field, and GitHub-storage file values become repository

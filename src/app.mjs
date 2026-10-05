@@ -17,6 +17,10 @@ import {
   validateRecord as validateSharedRecord
 } from "@signalwerk/minicms/core/content";
 import {
+  recordFileStem,
+  recordIdFromFileStem
+} from "@signalwerk/minicms/core/slug";
+import {
   isRemoteCollection,
   validateSourceConfig as validateSharedConfig
 } from "@signalwerk/minicms/core/connectors";
@@ -199,10 +203,14 @@ async function pruneEmptyContentAddressedDirectories(sources) {
   }
 }
 
-function summarize(record, stat, collection) {
+function summarize(record, stat, collection, filePath) {
   return summarizeRecord(
     record,
-    { birthtime: stat.birthtime, mtime: stat.mtime },
+    {
+      birthtime: stat.birthtime,
+      mtime: stat.mtime,
+      filename: path.basename(filePath, path.extname(filePath))
+    },
     collection
   );
 }
@@ -294,16 +302,18 @@ export function createApp({
     return { config, collection, folder };
   }
 
-  function recordPath(folder, collection, filename) {
-    assertSharedSafeName(filename, "record filename");
+  function recordPath(folder, collection, stem) {
+    assertSharedSafeName(stem, "record filename");
     const extension = String(collection.extension || "yml").replace(/^\./, "");
     if (!["yml", "yaml"].includes(extension)) {
       throw httpError(500, `Unsupported extension "${extension}".`);
     }
-    return path.join(folder, `${filename}.${extension}`);
+    return path.join(folder, `${stem}.${extension}`);
   }
 
-  async function collectionRecords(folder, collection) {
+  // Record files are named `<slug>-<id>` or `<id>`; listing names is enough to
+  // find a record, and only the matching file is read.
+  async function recordFiles(folder, collection) {
     let entries;
     try {
       entries = await fs.readdir(folder, { withFileTypes: true });
@@ -311,49 +321,64 @@ export function createApp({
       if (error.code !== "ENOENT") throw error;
       entries = [];
     }
-    const sources = await Promise.all(
-      entries
-        .filter(
-          (entry) =>
-            entry.isFile() &&
-            [".yml", ".yaml"].includes(path.extname(entry.name).toLowerCase())
-        )
-        .map(async (entry) => {
-          const filePath = path.join(folder, entry.name);
-          const [record, stat] = await Promise.all([
-            readYaml(filePath),
-            fs.stat(filePath)
-          ]);
-          const filename = path.basename(entry.name, path.extname(entry.name));
-          if (record?.filename !== filename) {
-            throw httpError(
-              409,
-              `Record file "${collection.name}/${entry.name}" contains filename "${record?.filename ?? ""}".`
-            );
-          }
-          return { record, filePath, stat };
-        })
-    );
+    const files = entries
+      .filter(
+        (entry) =>
+          entry.isFile() &&
+          [".yml", ".yaml"].includes(path.extname(entry.name).toLowerCase())
+      )
+      .map((entry) => ({
+        name: entry.name,
+        filePath: path.join(folder, entry.name),
+        id: recordIdFromFileStem(path.basename(entry.name, path.extname(entry.name)))
+      }));
     const ids = new Set();
-    for (const { record } of sources) {
-      if (ids.has(record.id)) {
+    for (const file of files) {
+      if (!file.id) {
         throw httpError(
           409,
-          `Collection "${collection.name}" contains record id "${record.id}" more than once.`
+          `Record file "${collection.name}/${file.name}" does not end with a record id.`
         );
       }
-      ids.add(record.id);
+      if (ids.has(file.id)) {
+        throw httpError(
+          409,
+          `Collection "${collection.name}" contains record id "${file.id}" more than once.`
+        );
+      }
+      ids.add(file.id);
     }
-    return sources;
+    return files;
+  }
+
+  async function readRecordFile(collection, file) {
+    const [record, stat] = await Promise.all([
+      readYaml(file.filePath),
+      fs.stat(file.filePath)
+    ]);
+    if (record?.id !== file.id) {
+      throw httpError(
+        409,
+        `Record file "${collection.name}/${file.name}" does not end with its id "${record?.id ?? ""}".`
+      );
+    }
+    return { record, stat, filePath: file.filePath };
+  }
+
+  async function collectionRecords(folder, collection) {
+    return Promise.all(
+      (await recordFiles(folder, collection)).map((file) =>
+        readRecordFile(collection, file)
+      )
+    );
   }
 
   async function recordSource(folder, collection, id) {
     assertSharedSafeName(id, "record id");
-    return (
-      (await collectionRecords(folder, collection)).find(
-        ({ record }) => record.id === id
-      ) ?? null
+    const file = (await recordFiles(folder, collection)).find(
+      (candidate) => candidate.id === id
     );
+    return file ? readRecordFile(collection, file) : null;
   }
 
   app.use("/api", authentication.cors);
@@ -609,7 +634,7 @@ export function createApp({
     try {
       const { collection, folder } = await getCollection(request.params.collectionName);
       const items = (await collectionRecords(folder, collection)).map(
-        ({ record, stat }) => summarize(record, stat, collection)
+        ({ record, stat, filePath }) => summarize(record, stat, collection, filePath)
       );
       items.sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
       response.json({ collection: collection.name, items });
@@ -651,48 +676,52 @@ export function createApp({
         validateSharedRecord(request.body, collection, config);
         const source = await recordSource(folder, collection, request.params.recordId);
         if (!source) throw httpError(404, `Record "${request.params.recordId}" does not exist.`);
-        if (request.body?.filename !== source.record.filename) {
-          throw httpError(400, "Rename the record to change its filename.");
-        }
         const filePath = source.filePath;
         await writeYamlAtomic(filePath, request.body);
         const stat = await fs.stat(filePath);
-        response.json({ saved: true, item: summarize(request.body, stat, collection) });
+        response.json({
+          saved: true,
+          item: summarize(request.body, stat, collection, filePath)
+        });
       } catch (error) {
         next(error);
       }
     })
   );
 
+  // Re-render the slug part of a record's filename from its current fields.
   app.post(
     "/api/collections/:collectionName/:recordId/rename",
     projectWrite(async (request, response, next) => {
       try {
-        const { config, collection, folder } = await getCollection(
+        const { collection, folder } = await getCollection(
           request.params.collectionName
         );
         const id = request.params.recordId;
-        const filename = request.body?.filename;
-        assertSharedSafeName(filename, "record filename");
         const source = await recordSource(folder, collection, id);
         if (!source) throw httpError(404, `Record "${id}" does not exist.`);
-        if (filename === source.record.filename) {
-          throw httpError(400, "The new filename must be different.");
+        const { record, filePath: oldPath } = source;
+        const newPath = recordPath(
+          folder,
+          collection,
+          recordFileStem(record.id, collection, { fields: record.properties })
+        );
+        if (newPath === oldPath) {
+          response.json({
+            saved: false,
+            record,
+            item: summarize(record, source.stat, collection, oldPath)
+          });
+          return;
         }
-        const oldPath = source.filePath;
-        const newPath = recordPath(folder, collection, filename);
-        const record = source.record;
         try {
           await fs.access(newPath);
-          throw httpError(409, `Record filename "${filename}" already exists.`);
+          throw httpError(409, `Record file "${path.basename(newPath)}" already exists.`);
         } catch (error) {
           if (error.status === 409) throw error;
           if (error.code !== "ENOENT") throw error;
         }
-
-        const renamedRecord = { ...record, filename };
-        validateSharedRecord(renamedRecord, collection, config);
-        await writeYamlAtomic(newPath, renamedRecord);
+        await writeYamlAtomic(newPath, record);
         try {
           await fs.unlink(oldPath);
         } catch (error) {
@@ -702,8 +731,8 @@ export function createApp({
         const stat = await fs.stat(newPath);
         response.json({
           saved: true,
-          record: renamedRecord,
-          item: summarize(renamedRecord, stat, collection)
+          record,
+          item: summarize(record, stat, collection, newPath)
         });
       } catch (error) {
         next(error);
@@ -826,10 +855,16 @@ export function createApp({
       if (await recordSource(folder, collection, request.body.id)) {
         throw httpError(409, `Record "${request.body.id}" already exists.`);
       }
-      const filePath = recordPath(folder, collection, request.body.filename);
+      const filePath = recordPath(
+        folder,
+        collection,
+        recordFileStem(request.body.id, collection, {
+          fields: request.body.properties
+        })
+      );
       try {
         await fs.access(filePath);
-        throw httpError(409, `Record filename "${request.body.filename}" already exists.`);
+        throw httpError(409, `Record file "${path.basename(filePath)}" already exists.`);
       } catch (error) {
         if (error.status === 409) throw error;
         if (error.code !== "ENOENT") throw error;
@@ -838,7 +873,10 @@ export function createApp({
       const stat = await fs.stat(filePath);
       response
         .status(201)
-        .json({ saved: true, item: summarize(request.body, stat, collection) });
+        .json({
+          saved: true,
+          item: summarize(request.body, stat, collection, filePath)
+        });
     } catch (error) {
       next(error);
     }

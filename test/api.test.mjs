@@ -14,6 +14,7 @@ import {
 } from "../src/config-transaction.mjs";
 
 const HOME_ID = "pagehome0000001";
+const HOME_STEM = `home-${HOME_ID}`;
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -84,9 +85,8 @@ collections:
     "utf8"
   );
   await fs.writeFile(
-    path.join(rootDir, "content", "pages", "home.yml"),
+    path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`),
     `id: ${HOME_ID}
-filename: home
 type: page
 order: 0
 properties:
@@ -182,7 +182,7 @@ test("serves configuration and collection summaries", async () => {
       response.json()
     );
     assert.deepEqual(list.items.map((item) => item.id), [HOME_ID]);
-    assert.deepEqual(list.items.map((item) => item.filename), ["home"]);
+    assert.deepEqual(list.items.map((item) => item.filename), [HOME_STEM]);
     assert.equal(list.items[0].hierarchy_id, "84a3ef27-cdce-477b-863f-c1f418037685");
     assert.equal(list.items[0].hidden, false);
     assert.equal(list.items[0].properties.title, "Home");
@@ -315,7 +315,6 @@ test("enforces slot defaults and minimums at the API persistence boundary", asyn
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         id: "pageaccordion01",
-        filename: "invalid-accordion",
         type: "page",
         order: 1,
         properties: {
@@ -382,7 +381,7 @@ test("moves a populated collection folder in the config transaction", async () =
     const loaded = await fetch(`${baseUrl}/api/config`);
     const config = await loaded.json();
     const etag = loaded.headers.get("etag");
-    const oldPath = path.join(rootDir, "content", "pages", "home.yml");
+    const oldPath = path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`);
     const oldBytes = await fs.readFile(oldPath);
     config.collections.pages.folder = "content/documents";
 
@@ -391,7 +390,7 @@ test("moves a populated collection folder in the config transaction", async () =
     await assert.rejects(fs.access(oldPath), (error) => error.code === "ENOENT");
     assert.deepEqual(
       await fs.readFile(
-        path.join(rootDir, "content", "documents", "home.yml")
+        path.join(rootDir, "content", "documents", `${HOME_STEM}.yml`)
       ),
       oldBytes
     );
@@ -488,7 +487,7 @@ test("validates schema rename plans before inspecting or writing collection stor
       await fs.readFile(path.join(rootDir, "cms.config.yml"), "utf8"),
       originalConfig
     );
-    await fs.access(path.join(rootDir, "content", "pages", "home.yml"));
+    await fs.access(path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`));
     await fs.access(path.join(rootDir, "content", "files"));
     await assert.rejects(
       fs.access(path.join(rootDir, "content", "documents")),
@@ -510,7 +509,7 @@ test("rejects media storage-mode changes without an explicit offline migration",
       "utf8"
     );
     const originalRecord = await fs.readFile(
-      path.join(rootDir, "content", "pages", "home.yml"),
+      path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`),
       "utf8"
     );
     next.connectors.default = {
@@ -532,7 +531,7 @@ test("rejects media storage-mode changes without an explicit offline migration",
     );
     assert.equal(
       await fs.readFile(
-        path.join(rootDir, "content", "pages", "home.yml"),
+        path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`),
         "utf8"
       ),
       originalRecord
@@ -613,9 +612,8 @@ test("transactionally renames concrete schema keys, records, media, and cache na
       filename: "Original image.png"
     };
     await fs.writeFile(
-      path.join(rootDir, "content", "pages", "home.yml"),
+      path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`),
       `id: ${HOME_ID}
-filename: home
 type: page
 order: 0
 properties:
@@ -639,9 +637,8 @@ slots:
       "utf8"
     );
     await fs.writeFile(
-      path.join(rootDir, "content", "files", "manual.yml"),
+      path.join(rootDir, "content", "files", "filemanual00001.yml"),
       `id: filemanual00001
-filename: manual
 type: download
 order: 0
 properties:
@@ -718,7 +715,7 @@ slots: {}
       (error) => error.code === "ENOENT"
     );
     const migratedPage = await readYaml(
-      path.join(rootDir, "content", "documents", "home.yml")
+      path.join(rootDir, "content", "documents", `${HOME_STEM}.yml`)
     );
     assert.equal(migratedPage.type, "article");
     assert.equal(migratedPage.slots.content[0].type, "rich_text");
@@ -737,7 +734,7 @@ slots: {}
     assert.deepEqual(migratedPage.properties.image, structuredImage);
     assert.equal(
       (
-        await readYaml(path.join(rootDir, "content", "files", "manual.yml"))
+        await readYaml(path.join(rootDir, "content", "files", "filemanual00001.yml"))
       ).properties.file,
       `/media/documents/${fileHash}/Manual.pdf`
     );
@@ -788,11 +785,10 @@ test("keeps GitHub media global while renaming collection records and cache keys
     const current = await initial.json();
 
     const incidentalHash = "a".repeat(64);
-    const filePath = path.join(rootDir, "content", "files", "manual.yml");
+    const filePath = path.join(rootDir, "content", "files", "filemanual00001.yml");
     await fs.writeFile(
       filePath,
       `id: filemanual00001
-filename: manual
 type: download
 order: 0
 properties:
@@ -837,7 +833,7 @@ slots: {}
       }
     );
     assert.equal(renamed.status, 200, await renamed.text());
-    await fs.access(path.join(rootDir, "content", "documents", "home.yml"));
+    await fs.access(path.join(rootDir, "content", "documents", `${HOME_STEM}.yml`));
     await assert.rejects(
       fs.access(path.join(rootDir, "content", "pages")),
       (error) => error.code === "ENOENT"
@@ -886,11 +882,10 @@ test("renames remote aliases in local records without moving connector-owned sto
     );
     assert.equal(prepared.status, 200);
 
-    const pagePath = path.join(rootDir, "content", "pages", "home.yml");
+    const pagePath = path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`);
     await fs.writeFile(
       pagePath,
       `id: ${HOME_ID}
-filename: home
 type: page
 order: 0
 properties:
@@ -996,7 +991,7 @@ test("commits schema renames before best-effort cache cleanup and never follows 
       }
     );
     assert.equal(saved.status, 200);
-    await fs.access(path.join(rootDir, "content", "documents", "home.yml"));
+    await fs.access(path.join(rootDir, "content", "documents", `${HOME_STEM}.yml`));
     await assert.rejects(
       fs.access(path.join(rootDir, "content", "pages")),
       (error) => error.code === "ENOENT"
@@ -1056,7 +1051,6 @@ test("keeps new and moved empty API collections virtual until first write", asyn
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         id: "pagefirst000001",
-        filename: "first",
         type: "page",
         order: 0,
         properties: {
@@ -1069,7 +1063,7 @@ test("keeps new and moved empty API collections virtual until first write", asyn
     });
     assert.equal(created.status, 201);
     await fs.access(
-      path.join(rootDir, "content", "empty-renamed", "first.yml")
+      path.join(rootDir, "content", "empty-renamed", "pagefirst000001.yml")
     );
   });
 });
@@ -1136,7 +1130,7 @@ test("rejects collection folder collisions without changing config or content", 
       "utf8"
     );
     const originalRecord = await fs.readFile(
-      path.join(rootDir, "content", "pages", "home.yml"),
+      path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`),
       "utf8"
     );
     await fs.mkdir(path.join(rootDir, "content", "occupied"));
@@ -1159,7 +1153,7 @@ test("rejects collection folder collisions without changing config or content", 
     );
     assert.equal(
       await fs.readFile(
-        path.join(rootDir, "content", "pages", "home.yml"),
+        path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`),
         "utf8"
       ),
       originalRecord
@@ -1183,7 +1177,7 @@ test("rejects a collection move into its own source tree", async () => {
       "utf8"
     );
     const originalRecord = await fs.readFile(
-      path.join(rootDir, "content", "pages", "home.yml"),
+      path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`),
       "utf8"
     );
     config.collections.pages.folder = "content/pages/archive";
@@ -1201,7 +1195,7 @@ test("rejects a collection move into its own source tree", async () => {
     );
     assert.equal(
       await fs.readFile(
-        path.join(rootDir, "content", "pages", "home.yml"),
+        path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`),
         "utf8"
       ),
       originalRecord
@@ -1243,10 +1237,10 @@ test("transactionally migrates record filenames when the YAML extension changes"
       assert.equal(saved.status, 200, await saved.text());
       const folder = path.join(rootDir, "content", collectionName);
       await assert.rejects(
-        fs.access(path.join(folder, "home.yml")),
+        fs.access(path.join(folder, `${HOME_STEM}.yml`)),
         (error) => error.code === "ENOENT"
       );
-      assert.equal((await readYaml(path.join(folder, "home.yaml"))).id, HOME_ID);
+      assert.equal((await readYaml(path.join(folder, `${HOME_STEM}.yaml`))).id, HOME_ID);
       assert.equal(
         (
           await fetch(`${baseUrl}/api/collections/${collectionName}/${HOME_ID}`).then(
@@ -1276,10 +1270,10 @@ test("rejects hidden file and tree collisions at migrated extension paths", asyn
       const next = await loaded.json();
       const configPath = path.join(rootDir, "cms.config.yml");
       const originalConfig = await fs.readFile(configPath, "utf8");
-      const oldRecordPath = path.join(rootDir, "content", "pages", "home.yml");
+      const oldRecordPath = path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`);
       const originalRecord = await fs.readFile(oldRecordPath, "utf8");
       const collisionName = collisionKind === "file"
-        ? "home.yaml"
+        ? `${HOME_STEM}.yaml`
         : "rogue.YAML";
       const collisionPath = path.join(
         rootDir,
@@ -1388,27 +1382,25 @@ test("preflights record identity, extension, and current schema before any renam
     {
       name: "filename identity",
       prepare: async (rootDir) => {
-        const recordPath = path.join(rootDir, "content", "pages", "home.yml");
+        const recordPath = path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`);
         const source = await fs.readFile(recordPath, "utf8");
         await fs.writeFile(
           recordPath,
-          source.replace("filename: home", "filename: mismatch")
+          source.replace(`id: ${HOME_ID}`, "id: pagemismatch001")
         );
       },
-      message: /contains filename "mismatch"/
+      message: /does not end with its id "pagemismatch001"/
     },
     {
       name: "configured extension",
       prepare: async (rootDir) => {
         const source = await fs.readFile(
-          path.join(rootDir, "content", "pages", "home.yml"),
+          path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`),
           "utf8"
         );
         await fs.writeFile(
-          path.join(rootDir, "content", "pages", "rogue.yaml"),
-          source
-            .replace(`id: ${HOME_ID}`, "id: pagerogue000001")
-            .replace("filename: home", "filename: rogue")
+          path.join(rootDir, "content", "pages", "rogue-pagerogue000001.yaml"),
+          source.replace(`id: ${HOME_ID}`, "id: pagerogue000001")
         );
       },
       message: /configured \.yml extension/
@@ -1416,7 +1408,7 @@ test("preflights record identity, extension, and current schema before any renam
     {
       name: "current schema",
       prepare: async (rootDir) => {
-        const recordPath = path.join(rootDir, "content", "pages", "home.yml");
+        const recordPath = path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`);
         const source = await fs.readFile(recordPath, "utf8");
         await fs.writeFile(recordPath, source.replace("type: page", "type: missing"));
       },
@@ -1517,7 +1509,7 @@ test("rejects linked media namespaces before moving records or configuration", a
       await fs.readFile(path.join(rootDir, "cms.config.yml"), "utf8"),
       originalConfig
     );
-    await fs.access(path.join(rootDir, "content", "pages", "home.yml"));
+    await fs.access(path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`));
     assert.equal(await fs.readFile(path.join(outside, "sentinel.txt"), "utf8"), "keep");
     await assert.rejects(
       fs.access(path.join(rootDir, "content", "documents")),
@@ -1562,7 +1554,7 @@ test("rejects unsafe collection folder topology and linked components", async (t
     const linked = structuredClone(config);
     linked.collections.pages.folder = "content/linked/pages";
     assert.equal((await putConfig(baseUrl, linked, etag)).status, 400);
-    await fs.access(path.join(rootDir, "content", "pages", "home.yml"));
+    await fs.access(path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`));
   });
 });
 
@@ -1617,7 +1609,6 @@ test("refuses a configured collection folder replaced by a symlink", async (t) =
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         id: "pageoutside0001",
-        filename: "outside",
         type: "page",
         order: 0,
         properties: {
@@ -1682,10 +1673,10 @@ test("recovers copy-first folder transactions from either config side", async ()
           (error) => error.code === "ENOENT"
         );
         await fs.access(
-          path.join(rootDir, "content", "recovered", "home.yml")
+          path.join(rootDir, "content", "recovered", `${HOME_STEM}.yml`)
         );
       } else {
-        await fs.access(path.join(rootDir, "content", "pages", "home.yml"));
+        await fs.access(path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`));
         await assert.rejects(
           fs.access(path.join(rootDir, "content", "recovered")),
           (error) => error.code === "ENOENT"
@@ -1735,7 +1726,7 @@ test("recovers in-place record rewrites before, during, and after the config com
           pages,
           { recursive: true }
         );
-        const recordPath = path.join(pages, "home.yml");
+        const recordPath = path.join(pages, `${HOME_STEM}.yml`);
         const source = await fs.readFile(recordPath, "utf8");
         await fs.writeFile(
           recordPath,
@@ -1776,7 +1767,7 @@ test("recovers in-place record rewrites before, during, and after the config com
 
       await createConfigTransaction({ rootDir, configFile }).recover();
       const recovered = await fs.readFile(
-        path.join(rootDir, "content", "pages", "home.yml"),
+        path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`),
         "utf8"
       );
       if (phase.committed) {
@@ -1934,7 +1925,7 @@ test("recovery fails closed when its backup root became a symlink", async (t) =>
       await fs.readFile(path.join(outside, "sentinel.txt"), "utf8"),
       "do not remove"
     );
-    await fs.access(path.join(rootDir, "content", "pages", "home.yml"));
+    await fs.access(path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`));
     await fs.access(transactionDir);
   } finally {
     await fs.rm(rootDir, { recursive: true, force: true });
@@ -2688,7 +2679,6 @@ test("persists a complete record as YAML and reads it back", async () => {
   await withServer(async (baseUrl, rootDir) => {
     const record = {
       id: "pagenew00000001",
-      filename: "new-page",
       type: "page",
       order: 1,
       properties: {
@@ -2720,7 +2710,7 @@ test("persists a complete record as YAML and reads it back", async () => {
     assert.equal(saved.status, 200);
 
     const source = await fs.readFile(
-      path.join(rootDir, "content", "pages", "new-page.yml"),
+      path.join(rootDir, "content", "pages", "new-page-pagenew00000001.yml"),
       "utf8"
     );
     assert.match(source, /title: Changed/);
@@ -2728,70 +2718,60 @@ test("persists a complete record as YAML and reads it back", async () => {
   });
 });
 
-test("renames a record file without changing its id", async () => {
+test("names record files <slug>-<id> and re-renders only the slug on rename", async () => {
   await withServer(async (baseUrl, rootDir) => {
-    const renamed = await fetch(`${baseUrl}/api/collections/pages/${HOME_ID}/rename`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ filename: "renamed-home" })
+    const pages = path.join(rootDir, "content", "pages");
+    const unchanged = await fetch(`${baseUrl}/api/collections/pages/${HOME_ID}/rename`, {
+      method: "POST"
     });
-    assert.equal(renamed.status, 200);
-    const result = await renamed.json();
-    assert.equal(result.record.id, HOME_ID);
-    assert.equal(result.record.filename, "renamed-home");
-    assert.equal(result.item.id, HOME_ID);
-    assert.equal(result.item.filename, "renamed-home");
+    assert.equal(unchanged.status, 200);
+    assert.equal((await unchanged.json()).saved, false);
 
     const record = await fetch(
       `${baseUrl}/api/collections/pages/${HOME_ID}`
     ).then((response) => response.json());
-    assert.equal(record.filename, "renamed-home");
-    await assert.rejects(
-      fs.access(path.join(rootDir, "content", "pages", "home.yml"))
-    );
+    assert.equal(Object.hasOwn(record, "filename"), false);
+    record.properties.title = "Renamed Home";
+    const saved = await fetch(`${baseUrl}/api/collections/pages/${HOME_ID}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(record)
+    });
+    assert.equal(saved.status, 200);
+    assert.equal((await saved.json()).item.filename, HOME_STEM);
 
-    const source = await fs.readFile(
-      path.join(rootDir, "content", "pages", "renamed-home.yml"),
-      "utf8"
-    );
-    assert.match(source, new RegExp(`^id: ${HOME_ID}\nfilename: renamed-home$`, "m"));
+    const renamed = await fetch(`${baseUrl}/api/collections/pages/${HOME_ID}/rename`, {
+      method: "POST"
+    });
+    assert.equal(renamed.status, 200);
+    const result = await renamed.json();
+    assert.equal(result.saved, true);
+    assert.equal(result.record.id, HOME_ID);
+    assert.equal(result.item.filename, `renamed-home-${HOME_ID}`);
+    assert.deepEqual(await fs.readdir(pages), [`renamed-home-${HOME_ID}.yml`]);
 
-    await fs.writeFile(
-      path.join(rootDir, "content", "pages", "taken.yml"),
-      source
-        .replace(`id: ${HOME_ID}`, "id: pagetaken000001")
-        .replace("filename: renamed-home", "filename: taken"),
-      "utf8"
+    const created = await fetch(`${baseUrl}/api/collections/pages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...record, id: "pagesecond00001" })
+    });
+    assert.equal(created.status, 201);
+    assert.equal(
+      (await created.json()).item.filename,
+      "renamed-home-pagesecond00001"
     );
-    const collision = await fetch(
-      `${baseUrl}/api/collections/pages/${HOME_ID}/rename`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ filename: "taken" })
-      }
-    );
-    assert.equal(collision.status, 409);
-    assert.match((await collision.json()).message, /already exists/);
-
     const duplicate = await fetch(`${baseUrl}/api/collections/pages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...record, filename: "another-file" })
+      body: JSON.stringify(record)
     });
     assert.equal(duplicate.status, 409);
     assert.match((await duplicate.json()).message, /already exists/);
 
-    await fs.writeFile(
-      path.join(rootDir, "content", "pages", "mismatch.yml"),
-      source
-        .replace(`id: ${HOME_ID}`, "id: pagemismatch01")
-        .replace("filename: renamed-home", "filename: elsewhere"),
-      "utf8"
-    );
-    const mismatched = await fetch(`${baseUrl}/api/collections/pages`);
-    assert.equal(mismatched.status, 409);
-    assert.match((await mismatched.json()).message, /contains filename "elsewhere"/);
+    await fs.writeFile(path.join(pages, "no-id.yml"), "id: pagenoid0000001\n");
+    const invalid = await fetch(`${baseUrl}/api/collections/pages`);
+    assert.equal(invalid.status, 409);
+    assert.match((await invalid.json()).message, /does not end with a record id/);
   });
 });
 
@@ -2802,7 +2782,6 @@ test("rejects child types that are not allowed by a slot", async () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         id: "pagebad00000001",
-        filename: "bad-page",
         type: "page",
         properties: { title: "Bad" },
         slots: {
@@ -2850,7 +2829,6 @@ test("deletes leaf records and their configured uploads but refuses to orphan ch
     assert.equal(savedHome.status, 200);
     const child = {
       id: "pagechild000001",
-      filename: "child-page",
       type: "page",
       order: 1,
       properties: {
@@ -2933,7 +2911,6 @@ test("record deletion never follows a linked media file", async (t) => {
 
     const record = {
       id: "pagelinked00001",
-      filename: "linked-page",
       type: "page",
       order: 1,
       properties: {

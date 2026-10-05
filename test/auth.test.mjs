@@ -15,6 +15,7 @@ import {
 } from "../src/config.mjs";
 
 const HOME_ID = "pagehome0000001";
+const HOME_STEM = `home-${HOME_ID}`;
 
 const ADMIN_ORIGIN = "https://admin.example";
 const SECOND_ADMIN_ORIGIN = "https://another-admin.example:8443";
@@ -61,9 +62,8 @@ collections:
     "utf8"
   );
   await fs.writeFile(
-    path.join(rootDir, "content", "pages", "home.yml"),
+    path.join(rootDir, "content", "pages", `${HOME_STEM}.yml`),
     `id: ${HOME_ID}
-filename: home
 type: page
 order: 0
 properties:
