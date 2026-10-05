@@ -16,15 +16,13 @@ import { createMediaRouter } from "../src/image/routes.mjs";
 const SVG_SOURCE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80"><script>alert(1)</script><rect width="120" height="80" fill="red"/></svg>`;
 const PADDED_SVG_SOURCE = `<!--${" ".repeat(70 * 1024)}-->${SVG_SOURCE}`;
 
-function configSource({ publicFolder = "/media", schema = "images_v1" } = {}) {
+function configSource({ schema = "images_v1" } = {}) {
   return `connectors:
   default:
     name: api
     api_url: https://api.example.com
     auth_url: https://auth.example.com
 site:
-  media_folder: content/uploads
-  public_folder: ${publicFolder}
   image_processing:
     width: 64
     height: 64
@@ -38,8 +36,8 @@ node_types:
     kind: document
     fields:
       title: { widget: string }
-      image: { widget: image, accept: [image/jpeg, image/png, image/tiff, .tif, .tiff, image/svg+xml] }
-      file: { widget: file, accept: ["*/*"] }
+      image: { widget: image, media_folder: content/uploads, accept: [image/jpeg, image/png, image/tiff, .tif, .tiff, image/svg+xml] }
+      file: { widget: file, media_folder: content/uploads, accept: ["*/*"] }
 collections:
   pages:
     folder: content/pages
@@ -460,7 +458,7 @@ test("uploads directly into the readable content-addressed image route", async (
     }).png().toBuffer();
     const sha = createHash("sha256").update(original).digest("hex");
     const upload = await fetch(
-      `${baseUrl}/api/media/pages?filename=Fresh%20Image.png&widget=image`,
+      `${baseUrl}/api/media/pages?filename=Fresh%20Image.png&widget=image&media_folder=content%2Fuploads`,
       {
         method: "POST",
         headers: { "content-type": "image/png" },
@@ -902,30 +900,6 @@ test("schema changes reject old URLs and publish only the new namespace", async 
   });
 });
 
-test("canonical transformed URLs survive a custom public media folder", async () => {
-  await withServer(async ({ baseUrl, config, media }) => {
-    const customSource = media.photo.source.replace(
-      "/media/",
-      "/assets/library/"
-    );
-    const route = servicePath(customSource, config, {
-      width: 40,
-      height: 30
-    });
-    assert.match(
-      route,
-      new RegExp(`/images/${media.photo.sha}/resize@`)
-    );
-    const response = await fetch(`${baseUrl}${route}`);
-    assert.equal(response.status, 200);
-    const output = await sharp(
-      Buffer.from(await response.arrayBuffer())
-    ).metadata();
-    assert.equal(output.width, 40);
-    assert.equal(output.height, 27);
-  }, { publicFolder: "/assets/library" });
-});
-
 test("strictly rejects noncanonical routes, invalid operations, and oversized outputs", async () => {
   await withServer(async ({ baseUrl, config, addressedSha, addressedSource }) => {
     const valid = servicePath(addressedSource, config, {
@@ -1180,7 +1154,7 @@ test("raw delivery keeps streaming the verified open file after a path swap", as
   await fs.writeFile(sourcePath, original);
   const config = {
     connectors: { default: { name: "api" } },
-    site: { media_folder: "content/media", public_folder: "/media" }
+    site: {}
   };
   const imageService = {
     async raw() {
@@ -1234,7 +1208,7 @@ test("raw conditional and metadata exits close their verified file handles", asy
   await fs.writeFile(sourcePath, contents);
   const config = {
     connectors: { default: { name: "api" } },
-    site: { media_folder: "content/media", public_folder: "/media" }
+    site: {}
   };
   const imageService = {
     async raw() {
@@ -1305,7 +1279,7 @@ test("streamed uploads enforce their byte limit", async () => {
   await withServer(async ({ baseUrl, mediaDir }) => {
     const jsonBody = JSON.stringify({ ok: true });
     const jsonUpload = await fetch(
-      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("data.json")}&widget=file`,
+      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("data.json")}&widget=file&media_folder=content%2Fuploads`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1323,7 +1297,7 @@ test("streamed uploads enforce their byte limit", async () => {
     );
 
     const oversized = await fetch(
-      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("too-large.bin")}&widget=file`,
+      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("too-large.bin")}&widget=file&media_folder=content%2Fuploads`,
       {
         method: "POST",
         headers: { "content-type": "application/octet-stream" },
@@ -1449,7 +1423,7 @@ test("production authentication still protects mutations while public images rem
     await rawImage.arrayBuffer();
 
     const protectedUpload = await fetch(
-      `${baseUrl}/api/media/pages?filename=blocked.jpg&widget=image`,
+      `${baseUrl}/api/media/pages?filename=blocked.jpg&widget=image&media_folder=content%2Fuploads`,
       {
         method: "POST",
         headers: { "content-type": "image/jpeg" },

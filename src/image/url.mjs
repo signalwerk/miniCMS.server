@@ -9,7 +9,7 @@ function requestError(status, message) {
   return error;
 }
 
-function normalizeMediaReference(value, { mediaFolder, publicFolder }) {
+function normalizeMediaReference(value) {
   if (
     typeof value !== "string" ||
     !value ||
@@ -23,26 +23,11 @@ function normalizeMediaReference(value, { mediaFolder, publicFolder }) {
 
   const pathname = value.split(/[?#]/, 1)[0];
   const normalized = pathname.replace(/^\/+|\/+$/g, "");
-  const normalizedMediaFolder = String(mediaFolder)
-    .replace(/^\/+|\/+$/g, "");
-  const normalizedPublicFolder = String(publicFolder || "/media")
-    .replace(/^\/+|\/+$/g, "");
-  let relative = normalized;
-  for (const prefix of new Set([
-    normalizedMediaFolder,
-    normalizedPublicFolder,
-    "media"
-  ])) {
-    if (!prefix) continue;
-    if (relative === prefix) {
-      relative = "";
-      break;
-    }
-    if (relative.startsWith(`${prefix}/`)) {
-      relative = relative.slice(prefix.length + 1);
-      break;
-    }
-  }
+  const relative = normalized === "media"
+    ? ""
+    : normalized.startsWith("media/")
+      ? normalized.slice("media/".length)
+      : normalized;
   if (relative === "content" || relative.startsWith("content/")) {
     throw requestError(400, "The media path is outside the configured media folder.");
   }

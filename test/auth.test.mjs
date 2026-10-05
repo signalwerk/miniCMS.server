@@ -14,6 +14,8 @@ import {
   productionConfiguration
 } from "../src/config.mjs";
 
+const HOME_ID = "pagehome0000001";
+
 const ADMIN_ORIGIN = "https://admin.example";
 const SECOND_ADMIN_ORIGIN = "https://another-admin.example:8443";
 const GITHUB_ACCESS_TOKEN = "github-repo-token-delivered-by-the-auth-worker";
@@ -38,9 +40,7 @@ async function makeFixture() {
     name: api
     api_url: https://api.example.com
     auth_url: https://auth.example.com
-site:
-  media_folder: content/media
-  public_folder: /media
+site: {}
 node_types:
   page:
     kind: document
@@ -62,7 +62,8 @@ collections:
   );
   await fs.writeFile(
     path.join(rootDir, "content", "pages", "home.yml"),
-    `id: home
+    `id: ${HOME_ID}
+filename: home
 type: page
 order: 0
 properties:
@@ -298,7 +299,7 @@ test("the production machine token can only read config and records", async () =
         "/api/collections",
         "/api/collections/pages",
         "/api/collections/empty",
-        "/api/collections/pages/home"
+        `/api/collections/pages/${HOME_ID}`
       ];
       for (const pathname of readablePaths) {
         const response = await fetch(`${baseUrl}${pathname}`, {
@@ -312,7 +313,7 @@ test("the production machine token can only read config and records", async () =
         (error) => error.code === "ENOENT"
       );
 
-      const head = await fetch(`${baseUrl}/api/collections/pages/home`, {
+      const head = await fetch(`${baseUrl}/api/collections/pages/${HOME_ID}`, {
         method: "HEAD",
         headers: authorization
       });
@@ -327,10 +328,10 @@ test("the production machine token can only read config and records", async () =
         ["POST", "/api/auth/logout"],
         ["PUT", "/api/config"],
         ["POST", "/api/collections/pages"],
-        ["PUT", "/api/collections/pages/home"],
-        ["DELETE", "/api/collections/pages/home"],
-        ["POST", "/api/collections/pages/home/rename"],
-        ["POST", "/api/media/pages?filename=blocked.png&widget=image"]
+        ["PUT", `/api/collections/pages/${HOME_ID}`],
+        ["DELETE", `/api/collections/pages/${HOME_ID}`],
+        ["POST", `/api/collections/pages/${HOME_ID}/rename`],
+        ["POST", "/api/media/pages?filename=blocked.png&widget=image&media_folder=content%2Fmedia"]
       ];
       for (const [method, pathname] of forbiddenRequests) {
         const response = await fetch(`${baseUrl}${pathname}`, {
@@ -366,7 +367,7 @@ test("the production machine token can only read config and records", async () =
       );
       assert.equal(
         (
-          await fetch(`${baseUrl}/api/collections/pages/home/rename`, {
+          await fetch(`${baseUrl}/api/collections/pages/${HOME_ID}/rename`, {
             headers: authorization
           })
         ).status,

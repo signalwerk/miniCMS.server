@@ -13,6 +13,7 @@ import {
   normalizeSchemaRenames,
   validateSourceConfig
 } from "@signalwerk/minicms/core/connectors";
+import { configuredMediaFolders } from "@signalwerk/minicms/core/media";
 import { mediaStorageMode } from "./media-contract.mjs";
 
 const TRANSACTION_ROOT_NAME = ".minicms-config-transactions";
@@ -64,25 +65,6 @@ function localCollectionFolders(config, status = 400) {
     }
     entries.push({ name, folder });
   }
-  const mediaFolder = normalizeRepositoryPath(
-    config.site?.media_folder || "content/media",
-    "site.media_folder",
-    status
-  );
-  if (mediaFolder === "content" || !mediaFolder.startsWith("content/")) {
-    throw transactionError(
-      status,
-      "site.media_folder must be strictly inside content/."
-    );
-  }
-  for (const entry of entries) {
-    if (overlaps(entry.folder, mediaFolder)) {
-      throw transactionError(
-        status,
-        `Collection "${entry.name}" folder must not overlap site.media_folder.`
-      );
-    }
-  }
   for (let index = 0; index < entries.length; index += 1) {
     for (let candidate = index + 1; candidate < entries.length; candidate += 1) {
       if (!overlaps(entries[index].folder, entries[candidate].folder)) continue;
@@ -93,21 +75,6 @@ function localCollectionFolders(config, status = 400) {
     }
   }
   return new Map(entries.map(({ name, folder }) => [name, folder]));
-}
-
-function mediaFolder(config, status = 400) {
-  const folder = normalizeRepositoryPath(
-    config.site?.media_folder || "content/media",
-    "site.media_folder",
-    status
-  );
-  if (folder === "content" || !folder.startsWith("content/")) {
-    throw transactionError(
-      status,
-      "site.media_folder must be strictly inside content/."
-    );
-  }
-  return folder;
 }
 
 async function lstatOrNull(filePath) {
@@ -659,13 +626,12 @@ export function createConfigTransaction({ rootDir, configFile }) {
         }
         record = parseYaml(await fs.readFile(filePath, "utf8"));
         if (
-          typeof record?.id !== "string" ||
           path.basename(entry.relativePath, path.extname(entry.relativePath)) !==
-            record.id
+            record?.filename
         ) {
           throw transactionError(
             400,
-            `Record "${sourceName}/${entry.relativePath}" id must match its filename stem.`
+            `Record "${sourceName}/${entry.relativePath}" contains filename "${record?.filename ?? ""}".`
           );
         }
         validateRecord(record, currentCollection, currentConfig, 400);
@@ -677,7 +643,7 @@ export function createConfigTransaction({ rootDir, configFile }) {
           { storage }
         );
         validateRecord(migrated, nextCollection, nextConfig, 400);
-        const nextRelativePath = `${record.id}.${nextExtension}`;
+        const nextRelativePath = `${record.filename}.${nextExtension}`;
         if (
           nextRelativePath !== entry.relativePath &&
           occupiedPaths.has(nextRelativePath)
@@ -729,15 +695,25 @@ export function createConfigTransaction({ rootDir, configFile }) {
         "Configuration saves cannot change media storage mode. Migrate the project storage separately."
       );
     }
-    const currentMediaFolder = mediaFolder(currentConfig);
-    const nextMediaFolder = mediaFolder(nextConfig);
-    if (currentMediaFolder !== nextMediaFolder) {
-      throw transactionError(
-        400,
-        "Configuration saves cannot change site.media_folder. Migrate the project storage separately."
+    const collectionMediaFolders = (config, name) =>
+      configuredMediaFolders(config, config.collections[name]);
+    for (const [destinationName] of nextFolders) {
+      const sourceName = inverseRenames.get(destinationName) ??
+        (currentFolders.has(destinationName) ? destinationName : null);
+      if (!sourceName) continue;
+      const nextMediaFolders = new Set(
+        collectionMediaFolders(nextConfig, destinationName)
       );
+      const removed = collectionMediaFolders(currentConfig, sourceName).filter(
+        (folder) => !nextMediaFolders.has(folder)
+      );
+      if (removed.length) {
+        throw transactionError(
+          400,
+          `Configuration saves cannot remove media folder "${removed[0]}" from collection "${destinationName}". Migrate its media separately.`
+        );
+      }
     }
-
     for (const [destinationName, destinationFolder] of nextFolders) {
       const renamedSource = inverseRenames.get(destinationName);
       const sourceName = renamedSource ??
@@ -823,60 +799,70 @@ export function createConfigTransaction({ rootDir, configFile }) {
         const sourceName = inverseRenames.get(destinationName) ??
           (currentFolders.has(destinationName) ? destinationName : null);
         if (sourceName) continue;
-        const destinationRelative = `${nextMediaFolder}/${destinationName}`;
-        await assertDirectoryComponents(resolvedRoot, destinationRelative);
-        if (await lstatOrNull(absolute(destinationRelative))) {
-          throw transactionError(
-            409,
-            `New collection "${destinationName}" media namespace already exists.`
+        for (const mediaFolder of collectionMediaFolders(
+          nextConfig,
+          destinationName
+        )) {
+          const destinationRelative = `${mediaFolder}/${destinationName}`;
+          await assertDirectoryComponents(resolvedRoot, destinationRelative);
+          if (await lstatOrNull(absolute(destinationRelative))) {
+            throw transactionError(
+              409,
+              `New collection "${destinationName}" media namespace "${destinationRelative}" already exists.`
+            );
+          }
+          absentPaths.set(
+            destinationRelative,
+            `new collection "${destinationName}" media namespace`
           );
         }
-        absentPaths.set(
-          destinationRelative,
-          `new collection "${destinationName}" media namespace`
-        );
       }
       for (const { source: sourceName, destination: destinationName } of
         concreteCollectionRenamePairs(currentConfig, renames)) {
-        const sourceRelative = `${currentMediaFolder}/${sourceName}`;
-        const destinationRelative = `${nextMediaFolder}/${destinationName}`;
-        const source = absolute(sourceRelative);
-        const destination = absolute(destinationRelative);
-        await assertDirectoryComponents(resolvedRoot, sourceRelative);
-        await assertDirectoryComponents(resolvedRoot, destinationRelative);
-        if (source !== destination && (await lstatOrNull(destination))) {
-          throw transactionError(
-            409,
-            `Media namespace for collection "${destinationName}" already exists.`
-          );
+        for (const mediaFolder of collectionMediaFolders(
+          currentConfig,
+          sourceName
+        )) {
+          const sourceRelative = `${mediaFolder}/${sourceName}`;
+          const destinationRelative = `${mediaFolder}/${destinationName}`;
+          const source = absolute(sourceRelative);
+          const destination = absolute(destinationRelative);
+          await assertDirectoryComponents(resolvedRoot, sourceRelative);
+          await assertDirectoryComponents(resolvedRoot, destinationRelative);
+          if (source !== destination && (await lstatOrNull(destination))) {
+            throw transactionError(
+              409,
+              `Media namespace "${destinationRelative}" for collection "${destinationName}" already exists.`
+            );
+          }
+          if (source !== destination) {
+            absentPaths.set(
+              destinationRelative,
+              `media namespace for collection "${destinationName}"`
+            );
+          }
+          const sourceStat = await lstatOrNull(source);
+          if (!sourceStat) continue;
+          if (sourceStat.isSymbolicLink() || !sourceStat.isDirectory()) {
+            throw transactionError(
+              400,
+              `Media namespace "${sourceRelative}" for collection "${sourceName}" is not a regular directory.`
+            );
+          }
+          if (source === destination) continue;
+          plans.push({
+            kind: "media",
+            label: `media:${mediaFolder}:${sourceName}->${destinationName}`,
+            source: sourceRelative,
+            destination: destinationRelative,
+            mode: "copy",
+            inventory: await inventoryDirectory(
+              source,
+              `Media namespace "${sourceRelative}"`
+            ),
+            rewrites: new Map()
+          });
         }
-        if (source !== destination) {
-          absentPaths.set(
-            destinationRelative,
-            `media namespace for collection "${destinationName}"`
-          );
-        }
-        const sourceStat = await lstatOrNull(source);
-        if (!sourceStat) continue;
-        if (sourceStat.isSymbolicLink() || !sourceStat.isDirectory()) {
-          throw transactionError(
-            400,
-            `Media namespace for collection "${sourceName}" is not a regular directory.`
-          );
-        }
-        if (source === destination) continue;
-        plans.push({
-          kind: "media",
-          label: `media:${sourceName}->${destinationName}`,
-          source: sourceRelative,
-          destination: destinationRelative,
-          mode: "copy",
-          inventory: await inventoryDirectory(
-            source,
-            `Media namespace for collection "${sourceName}"`
-          ),
-          rewrites: new Map()
-        });
       }
     }
 

@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
 import { isRemoteCollection } from "@signalwerk/minicms/core/connectors";
+import { configuredMediaFolders } from "@signalwerk/minicms/core/media";
 import { parseContentAddressedMediaPath } from "@signalwerk/minicms/core/image-service";
 import { ASSET_FILENAME, mediaStorageMode } from "../media-contract.mjs";
 import {
@@ -213,11 +214,18 @@ async function safeDirectory(rootDir, configuredMediaFolder, { create = false } 
   return { declaredMediaRoot, trustedMediaRoot };
 }
 
-async function resolveStoredAsset({ rootDir, config, segments, filename }) {
-  const configuredMediaFolder = config.site?.media_folder || "content/media";
+function mediaFolders(config, collectionName = null) {
+  if (!collectionName) return configuredMediaFolders(config);
+  const collection = config.collections?.[collectionName];
+  return collection && !isRemoteCollection(collection)
+    ? configuredMediaFolders(config, collection)
+    : [];
+}
+
+async function resolveStoredAsset({ rootDir, mediaFolder, segments, filename }) {
   const { declaredMediaRoot, trustedMediaRoot } = await safeDirectory(
     rootDir,
-    configuredMediaFolder
+    mediaFolder
   );
 
   let current = declaredMediaRoot;
@@ -258,19 +266,17 @@ async function resolveStoredAsset({ rootDir, config, segments, filename }) {
 }
 
 async function resolveMediaSource({ rootDir, config, reference }) {
-  const mediaFolder = String(
-    config.site?.media_folder || "content/media"
-  ).replace(/^\/+|\/+$/g, "");
   const normalizedReference = String(reference || "").replace(/^\/+/, "");
-  const storageReference = normalizedReference.startsWith(`${mediaFolder}/`);
-  const relative = storageReference
-    ? normalizedReference.slice(mediaFolder.length + 1)
-    : normalizeMediaReference(reference, {
-        mediaFolder,
-        publicFolder: config.site?.public_folder || "/media"
-      });
-  const segments = relative.split("/");
   const storage = mediaStorageMode(config);
+  const folders = mediaFolders(config);
+  const matchedFolder = folders.find((folder) =>
+    normalizedReference.startsWith(`${folder}/`)
+  );
+  const storageReference = Boolean(matchedFolder);
+  const relative = storageReference
+    ? normalizedReference.slice(matchedFolder.length + 1)
+    : normalizeMediaReference(reference);
+  const segments = relative.split("/");
   const expectedLength = storage === "api" ? 3 : 2;
   if (segments.length !== expectedLength) {
     throw sourceError(404, "The requested media file does not exist.");
@@ -301,14 +307,24 @@ async function resolveMediaSource({ rootDir, config, reference }) {
   ) {
     throw sourceError(404, "The requested media file does not exist.");
   }
-  const source = await resolveStoredAsset({
-    rootDir,
-    config,
-    segments: storage === "api"
-      ? [collection, sha]
-      : [sha],
-    filename: storage === "api" ? ASSET_FILENAME : filename
-  });
+  const candidates = storageReference
+    ? [matchedFolder]
+    : mediaFolders(config, collection);
+  let source = null;
+  for (const mediaFolder of candidates) {
+    try {
+      source = await resolveStoredAsset({
+        rootDir,
+        mediaFolder,
+        segments: storage === "api" ? [collection, sha] : [sha],
+        filename: storage === "api" ? ASSET_FILENAME : filename
+      });
+      break;
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+  }
+  if (!source) throw sourceError(404, "The requested media file does not exist.");
   return Object.freeze({
     ...source,
     addressed: { collection, sha, filename }
@@ -321,38 +337,38 @@ async function resolveGithubHashSource({
   sha,
   sourceHash = hashUnchangedFile
 }) {
-  const configuredMediaFolder = config.site?.media_folder || "content/media";
-  const { declaredMediaRoot, trustedMediaRoot } = await safeDirectory(
-    rootDir,
-    configuredMediaFolder
-  );
-  const directory = path.join(declaredMediaRoot, sha);
-  const directoryStat = await fs.lstat(directory).catch((error) => {
-    if (error.code === "ENOENT" || error.code === "ENOTDIR") {
-      throw sourceError(404, "The requested media file does not exist.");
-    }
-    throw error;
-  });
-  if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) {
-    throw sourceError(404, "The requested media file does not exist.");
-  }
-  const realDirectory = await fs.realpath(directory);
-  if (!isInside(trustedMediaRoot, realDirectory)) {
-    throw sourceError(404, "The requested media file does not exist.");
-  }
-  const entries = await fs.readdir(realDirectory, { withFileTypes: true });
-  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-    if (!entry.isFile()) continue;
+  for (const mediaFolder of mediaFolders(config)) {
     try {
-      const source = await resolveStoredAsset({
+      const { declaredMediaRoot, trustedMediaRoot } = await safeDirectory(
         rootDir,
-        config,
-        segments: [sha],
-        filename: entry.name
-      });
-      if (await sourceHash(source) === sha) return source;
+        mediaFolder
+      );
+      const directory = path.join(declaredMediaRoot, sha);
+      const directoryStat = await fs.lstat(directory);
+      if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) {
+        continue;
+      }
+      const realDirectory = await fs.realpath(directory);
+      if (!isInside(trustedMediaRoot, realDirectory)) continue;
+      const entries = await fs.readdir(realDirectory, { withFileTypes: true });
+      for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+        if (!entry.isFile()) continue;
+        try {
+          const source = await resolveStoredAsset({
+            rootDir,
+            mediaFolder,
+            segments: [sha],
+            filename: entry.name
+          });
+          if (await sourceHash(source) === sha) return source;
+        } catch (error) {
+          if (error.status !== 404) throw error;
+        }
+      }
     } catch (error) {
-      if (error.status !== 404) throw error;
+      if (error?.status !== 404 && error?.code !== "ENOENT" && error?.code !== "ENOTDIR") {
+        throw error;
+      }
     }
   }
   throw sourceError(404, "The requested media file does not exist.");
@@ -376,12 +392,21 @@ async function resolveImageSource({
       sourceHash
     });
   }
-  const source = await resolveStoredAsset({
-    rootDir,
-    config,
-    segments: [route.collection, route.sha],
-    filename: ASSET_FILENAME
-  });
+  let source = null;
+  for (const mediaFolder of mediaFolders(config, route.collection)) {
+    try {
+      source = await resolveStoredAsset({
+        rootDir,
+        mediaFolder,
+        segments: [route.collection, route.sha],
+        filename: ASSET_FILENAME
+      });
+      break;
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+  }
+  if (!source) throw sourceError(404, "The requested media file does not exist.");
   if (await sourceHash(source) === route.sha) return source;
   throw sourceError(404, "The requested media file does not exist.");
 }
@@ -1400,9 +1425,8 @@ function createImageService({
     };
   }
 
-  async function uploadDirectory(config) {
-    const configuredMediaFolder = config.site?.media_folder || "content/media";
-    return safeDirectory(rootDir, configuredMediaFolder, { create: true });
+  async function uploadDirectory(mediaFolder) {
+    return safeDirectory(rootDir, mediaFolder, { create: true });
   }
 
   function validateProjectConfiguration(config, status = 500) {

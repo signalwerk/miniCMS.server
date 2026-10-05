@@ -35,14 +35,21 @@ same change unless backward compatibility is explicitly requested.
   file and atomically publishes them without buffering originals in memory.
 - `bin/minicms-api.mjs` starts either the loopback-only unauthenticated `dev`
   service or the always-authenticated production `start` service.
-- `bin/migrate-image-assets.mjs` is the explicit offline, preflight-first
-  one-time migration from filename-backed API media and scalar/`src` image
-  values to `asset.dat` plus `{hash, filename}`. Run it only while the service
-  is stopped; `--write` requires a new backup directory outside the project.
-  Resolve physical project, cache, and would-be backup paths before overlap
-  checks so symlinked ancestors cannot redirect cleanup into protected data.
-  Delete only preflighted cache files, and abort if the cache inventory drifts
-  before cleanup so no unbacked late entry is removed.
+- `bin/migrate-record-identity.mjs` is the explicit offline, preflight-first
+  one-time migration from readable record ids, `content_id`-style identity
+  fields, and site-level media folders to opaque record `id` plus `filename`
+  and per-field `media_folder`. Run it only while the service is stopped;
+  `--write` requires a new backup directory outside the project. It validates
+  every rewritten record against the next schema before writing and records
+  the readable-id map in the backup. The superseded image-asset migration was
+  removed after every volume adopted `{hash, filename}`.
+- Records are located by their opaque `id`: list, read, save, rename, and
+  delete scan the collection folder once, reject a stored `filename` that
+  differs from the file stem, and reject duplicate ids. Rename changes only the
+  `filename`. Record mutations (create/save/rename/delete) take the exclusive
+  project gate so a scan cannot race a concurrent move; uploads and reads stay
+  shared. Uploads must name the field's `media_folder`; acceptance comes from
+  the shared `uploadFieldAccept` helper.
 - Content-model behavior must remain DRY. Import it only through
   `@signalwerk/minicms/core/content`, `/core/connectors`, `/core/media`,
   `/core/slug`, and `/core/image-service`. Service configuration is a source
@@ -161,7 +168,7 @@ same change unless backward compatibility is explicitly requested.
   stale body with a newer revision.
 - A same-key local collection `folder` change is one config transaction.
   Collection folders must be distinct, non-nested strict descendants of
-  `content/`, must not overlap `site.media_folder`, and may not traverse
+  `content/`, must not overlap a local field's `media_folder`, and may not traverse
   symlink/non-directory components. Validate every next folder on config save
   and every configured folder again before runtime CRUD, including collections
   that did not move. The destination must be absent. Remote aliases never
@@ -173,8 +180,8 @@ same change unless backward compatibility is explicitly requested.
   Concrete collection renames migrate their configured content folder and API
   media namespace. GitHub-development media remains in its global hash layout.
   Configuration saves may not switch API/GitHub media storage mode; that needs
-  a separate offline migration. They likewise cannot change
-  `site.media_folder` online. Every surviving local record is validated against its
+  a separate offline migration. They likewise cannot remove a media folder
+  still used by a continuing collection. Every surviving local record is validated against its
   current schema and filename, recursively migrated through the shared core,
   and validated against the next schema before the first filesystem write.
   A continuing collection may change between `yml` and `yaml`; the transaction
@@ -248,7 +255,7 @@ Requires Node.js 24 or newer.
 npm install
 npm run dev -- --project-root /path/to/project
 npm start -- --project-root /path/to/project
-npm run migrate:images -- --project-root /path/to/project --cache-dir /path/to/cache --check
+npm run migrate:identity -- --project-root /path/to/project --check
 npm test
 docker compose config
 docker compose build

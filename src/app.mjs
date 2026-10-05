@@ -2,11 +2,11 @@ import express from "express";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import {
-  configuredCollectionMediaAccept,
   imageAssetMediaPath,
   mediaAcceptErrorMessage,
   mediaFileMatchesAccept,
-  recordMediaStoragePaths
+  recordMediaStoragePaths,
+  uploadFieldAccept
 } from "@signalwerk/minicms/core/media";
 import {
   assertSafeName as assertSharedSafeName,
@@ -294,13 +294,66 @@ export function createApp({
     return { config, collection, folder };
   }
 
-  function recordPath(folder, collection, id) {
-    assertSharedSafeName(id, "record id");
+  function recordPath(folder, collection, filename) {
+    assertSharedSafeName(filename, "record filename");
     const extension = String(collection.extension || "yml").replace(/^\./, "");
     if (!["yml", "yaml"].includes(extension)) {
       throw httpError(500, `Unsupported extension "${extension}".`);
     }
-    return path.join(folder, `${id}.${extension}`);
+    return path.join(folder, `${filename}.${extension}`);
+  }
+
+  async function collectionRecords(folder, collection) {
+    let entries;
+    try {
+      entries = await fs.readdir(folder, { withFileTypes: true });
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      entries = [];
+    }
+    const sources = await Promise.all(
+      entries
+        .filter(
+          (entry) =>
+            entry.isFile() &&
+            [".yml", ".yaml"].includes(path.extname(entry.name).toLowerCase())
+        )
+        .map(async (entry) => {
+          const filePath = path.join(folder, entry.name);
+          const [record, stat] = await Promise.all([
+            readYaml(filePath),
+            fs.stat(filePath)
+          ]);
+          const filename = path.basename(entry.name, path.extname(entry.name));
+          if (record?.filename !== filename) {
+            throw httpError(
+              409,
+              `Record file "${collection.name}/${entry.name}" contains filename "${record?.filename ?? ""}".`
+            );
+          }
+          return { record, filePath, stat };
+        })
+    );
+    const ids = new Set();
+    for (const { record } of sources) {
+      if (ids.has(record.id)) {
+        throw httpError(
+          409,
+          `Collection "${collection.name}" contains record id "${record.id}" more than once.`
+        );
+      }
+      ids.add(record.id);
+    }
+    return sources;
+  }
+
+  async function recordSource(folder, collection, id) {
+    assertSharedSafeName(id, "record id");
+    return (
+      (await collectionRecords(folder, collection)).find(
+        ({ record }) => record.id === id
+      ) ?? null
+    );
   }
 
   app.use("/api", authentication.cors);
@@ -348,11 +401,19 @@ export function createApp({
         if (!["image", "file"].includes(widget)) {
           throw httpError(400, `The upload widget must be "image" or "file".`);
         }
-        const acceptedTypes = configuredCollectionMediaAccept(
+        const mediaFolder = String(request.query.media_folder || "");
+        const acceptedTypes = uploadFieldAccept(
           config,
           collection,
-          widget
+          widget,
+          mediaFolder
         );
+        if (!acceptedTypes) {
+          throw httpError(
+            400,
+            `No ${widget} field in collection "${collection.name}" stores media in "${mediaFolder}".`
+          );
+        }
         const uploadedFile = {
           filename: originalName,
           mimeType: request.headers["content-type"]
@@ -366,7 +427,7 @@ export function createApp({
             mediaAcceptErrorMessage(uploadedFile, acceptedTypes)
           );
         }
-        const { trustedMediaRoot } = await imageService.uploadDirectory(config);
+        const { trustedMediaRoot } = await imageService.uploadDirectory(mediaFolder);
         await cleanUploadDirectoryOnce(trustedMediaRoot);
         const validateTemporary = widget === "image"
           ? ({ temporaryPath }) =>
@@ -376,12 +437,6 @@ export function createApp({
                 acceptedTypes
               )
           : undefined;
-        const publicFolder = String(
-          config.site?.public_folder || "/media"
-        ).replace(/\/$/, "");
-        const mediaFolder = String(
-          config.site?.media_folder || "content/media"
-        ).replace(/\/$/, "");
         const storage = mediaStorageMode(config);
         const descriptor = (filename, hash, reused, proposed = false) => ({
           filename,
@@ -391,7 +446,7 @@ export function createApp({
             {
               storage,
               collection: storage === "api" ? collection.name : null,
-              publicFolder
+              mediaFolder
             }
           ),
           storage_path: storage === "api"
@@ -464,13 +519,6 @@ export function createApp({
       const config = validateSharedConfig(envelope.config, 400);
       await ensureTransactionRecovery();
       imageService.validateProjectConfiguration(config, 400);
-      const mediaFolder = path.resolve(
-        rootDir,
-        config.site?.media_folder || "content/media"
-      );
-      if (!isInside(contentRoot, mediaFolder)) {
-        throw httpError(400, "site.media_folder must be inside content/.");
-      }
       for (const [name, collection] of Object.entries(config.collections)) {
         if (isRemoteCollection(collection)) continue;
         if (typeof collection.folder !== "string" || !collection.folder) {
@@ -560,24 +608,8 @@ export function createApp({
   app.get("/api/collections/:collectionName", projectRead(async (request, response, next) => {
     try {
       const { collection, folder } = await getCollection(request.params.collectionName);
-      let entries;
-      try {
-        entries = await fs.readdir(folder, { withFileTypes: true });
-      } catch (error) {
-        if (error.code !== "ENOENT") throw error;
-        entries = [];
-      }
-      const extensions = new Set([".yml", ".yaml"]);
-      const files = entries.filter(
-        (entry) => entry.isFile() && extensions.has(path.extname(entry.name).toLowerCase())
-      );
-
-      const items = await Promise.all(
-        files.map(async (entry) => {
-          const filePath = path.join(folder, entry.name);
-          const [record, stat] = await Promise.all([readYaml(filePath), fs.stat(filePath)]);
-          return summarize(record, stat, collection);
-        })
+      const items = (await collectionRecords(folder, collection)).map(
+        ({ record, stat }) => summarize(record, stat, collection)
       );
       items.sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
       response.json({ collection: collection.name, items });
@@ -593,8 +625,9 @@ export function createApp({
         const { collection, folder } = await getCollection(
           request.params.collectionName
         );
-        const filePath = recordPath(folder, collection, request.params.recordId);
-        response.json(await readYaml(filePath));
+        const source = await recordSource(folder, collection, request.params.recordId);
+        if (!source) throw httpError(404, `Record "${request.params.recordId}" does not exist.`);
+        response.json(source.record);
       } catch (error) {
         if (error.code === "ENOENT") {
           next(httpError(404, `Record "${request.params.recordId}" does not exist.`));
@@ -607,7 +640,7 @@ export function createApp({
 
   app.put(
     "/api/collections/:collectionName/:recordId",
-    projectRead(async (request, response, next) => {
+    projectWrite(async (request, response, next) => {
       try {
         const { config, collection, folder } = await getCollection(
           request.params.collectionName
@@ -616,7 +649,12 @@ export function createApp({
           throw httpError(400, "The record id must match the URL.");
         }
         validateSharedRecord(request.body, collection, config);
-        const filePath = recordPath(folder, collection, request.params.recordId);
+        const source = await recordSource(folder, collection, request.params.recordId);
+        if (!source) throw httpError(404, `Record "${request.params.recordId}" does not exist.`);
+        if (request.body?.filename !== source.record.filename) {
+          throw httpError(400, "Rename the record to change its filename.");
+        }
+        const filePath = source.filePath;
         await writeYamlAtomic(filePath, request.body);
         const stat = await fs.stat(filePath);
         response.json({ saved: true, item: summarize(request.body, stat, collection) });
@@ -628,63 +666,31 @@ export function createApp({
 
   app.post(
     "/api/collections/:collectionName/:recordId/rename",
-    projectRead(async (request, response, next) => {
+    projectWrite(async (request, response, next) => {
       try {
         const { config, collection, folder } = await getCollection(
           request.params.collectionName
         );
-        const oldId = request.params.recordId;
-        const newId = request.body?.id;
-        assertSharedSafeName(newId, "record id");
-        if (newId === oldId) {
-          throw httpError(400, "The new record id must be different.");
+        const id = request.params.recordId;
+        const filename = request.body?.filename;
+        assertSharedSafeName(filename, "record filename");
+        const source = await recordSource(folder, collection, id);
+        if (!source) throw httpError(404, `Record "${id}" does not exist.`);
+        if (filename === source.record.filename) {
+          throw httpError(400, "The new filename must be different.");
         }
-
-        const oldPath = recordPath(folder, collection, oldId);
-        const newPath = recordPath(folder, collection, newId);
-        let record;
-        try {
-          record = await readYaml(oldPath);
-        } catch (error) {
-          if (error.code === "ENOENT") {
-            throw httpError(404, `Record "${oldId}" does not exist.`);
-          }
-          throw error;
-        }
+        const oldPath = source.filePath;
+        const newPath = recordPath(folder, collection, filename);
+        const record = source.record;
         try {
           await fs.access(newPath);
-          throw httpError(409, `Record "${newId}" already exists.`);
+          throw httpError(409, `Record filename "${filename}" already exists.`);
         } catch (error) {
           if (error.status === 409) throw error;
           if (error.code !== "ENOENT") throw error;
         }
 
-        if (collection.hierarchy?.enabled && !collection.hierarchy?.id_field) {
-          const entries = await fs.readdir(folder, { withFileTypes: true });
-          const yamlFiles = entries.filter(
-            (entry) =>
-              entry.isFile() &&
-              [".yml", ".yaml"].includes(path.extname(entry.name).toLowerCase())
-          );
-          for (const entry of yamlFiles) {
-            if (path.join(folder, entry.name) === oldPath) continue;
-            const candidate = await readYaml(path.join(folder, entry.name));
-            const candidateParent = hierarchyValue(
-              candidate,
-              collection,
-              "parent_field",
-              candidate?.parent ?? null
-            );
-            if (candidateParent === oldId) {
-              throw httpError(
-                409,
-                `Record "${oldId}" has child records and its hierarchy uses the filename as its id.`
-              );
-            }
-          }
-        }
-
-        const renamedRecord = { ...record, id: newId };
+        const renamedRecord = { ...record, filename };
         validateSharedRecord(renamedRecord, collection, config);
         await writeYamlAtomic(newPath, renamedRecord);
         try {
@@ -712,22 +718,16 @@ export function createApp({
         const { config, collection, folder } = await getCollection(
           request.params.collectionName
         );
-        const filePath = recordPath(folder, collection, request.params.recordId);
-        try {
-          await fs.access(filePath);
-        } catch (error) {
-          if (error.code === "ENOENT") {
-            throw httpError(404, `Record "${request.params.recordId}" does not exist.`);
-          }
-          throw error;
-        }
+        const source = await recordSource(folder, collection, request.params.recordId);
+        if (!source) throw httpError(404, `Record "${request.params.recordId}" does not exist.`);
+        const filePath = source.filePath;
 
         const entries = await fs.readdir(folder, { withFileTypes: true });
         const yamlFiles = entries.filter(
           (entry) =>
             entry.isFile() && [".yml", ".yaml"].includes(path.extname(entry.name).toLowerCase())
         );
-        const deletingRecord = await readYaml(filePath);
+        const deletingRecord = source.record;
         const deletingHierarchyId = hierarchyValue(
           deletingRecord,
           collection,
@@ -819,14 +819,17 @@ export function createApp({
     })
   );
 
-  app.post("/api/collections/:collectionName", projectRead(async (request, response, next) => {
+  app.post("/api/collections/:collectionName", projectWrite(async (request, response, next) => {
     try {
       const { config, collection, folder } = await getCollection(request.params.collectionName);
       validateSharedRecord(request.body, collection, config);
-      const filePath = recordPath(folder, collection, request.body.id);
+      if (await recordSource(folder, collection, request.body.id)) {
+        throw httpError(409, `Record "${request.body.id}" already exists.`);
+      }
+      const filePath = recordPath(folder, collection, request.body.filename);
       try {
         await fs.access(filePath);
-        throw httpError(409, `Record "${request.body.id}" already exists.`);
+        throw httpError(409, `Record filename "${request.body.filename}" already exists.`);
       } catch (error) {
         if (error.status === 409) throw error;
         if (error.code !== "ENOENT") throw error;

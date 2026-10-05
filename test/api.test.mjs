@@ -13,6 +13,8 @@ import {
   TRANSACTION_ROOT_NAME
 } from "../src/config-transaction.mjs";
 
+const HOME_ID = "pagehome0000001";
+
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -32,16 +34,14 @@ async function makeFixture() {
     name: api
     api_url: https://api.example.com
     auth_url: https://auth.example.com
-site:
-  media_folder: content/media
-  public_folder: /media
+site: {}
 node_types:
   page:
     kind: document
     fields:
       uuid: { widget: uuid }
       title: { widget: string }
-      image: { widget: image, accept: [image/png, image/svg+xml, image/tiff, .tif, .tiff] }
+      image: { widget: image, media_folder: content/media, accept: [image/png, image/svg+xml, image/tiff, .tif, .tiff] }
     views:
       detail:
         panels:
@@ -59,7 +59,7 @@ node_types:
   download:
     kind: document
     fields:
-      file: { widget: file, accept: ["*/*"] }
+      file: { widget: file, media_folder: content/media, accept: ["*/*"] }
 collections:
   pages:
     folder: content/pages
@@ -85,7 +85,8 @@ collections:
   );
   await fs.writeFile(
     path.join(rootDir, "content", "pages", "home.yml"),
-    `id: home
+    `id: ${HOME_ID}
+filename: home
 type: page
 order: 0
 properties:
@@ -180,14 +181,15 @@ test("serves configuration and collection summaries", async () => {
     const list = await fetch(`${baseUrl}/api/collections/pages`).then((response) =>
       response.json()
     );
-    assert.deepEqual(list.items.map((item) => item.id), ["home"]);
+    assert.deepEqual(list.items.map((item) => item.id), [HOME_ID]);
+    assert.deepEqual(list.items.map((item) => item.filename), ["home"]);
     assert.equal(list.items[0].hierarchy_id, "84a3ef27-cdce-477b-863f-c1f418037685");
     assert.equal(list.items[0].hidden, false);
     assert.equal(list.items[0].properties.title, "Home");
     assert.match(list.items[0].created_at, /^\d{4}-\d{2}-\d{2}T/);
     assert.match(list.items[0].updated_at, /^\d{4}-\d{2}-\d{2}T/);
 
-    const record = await fetch(`${baseUrl}/api/collections/pages/home`).then((response) =>
+    const record = await fetch(`${baseUrl}/api/collections/pages/${HOME_ID}`).then((response) =>
       response.json()
     );
     assert.equal(record.properties.title, "Home");
@@ -312,7 +314,8 @@ test("enforces slot defaults and minimums at the API persistence boundary", asyn
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        id: "invalid-accordion",
+        id: "pageaccordion01",
+        filename: "invalid-accordion",
         type: "page",
         order: 1,
         properties: {
@@ -396,10 +399,10 @@ test("moves a populated collection folder in the config transaction", async () =
     const listed = await fetch(`${baseUrl}/api/collections/pages`).then(
       (response) => response.json()
     );
-    assert.deepEqual(listed.items.map((item) => item.id), ["home"]);
+    assert.deepEqual(listed.items.map((item) => item.id), [HOME_ID]);
     assert.equal(
       (
-        await fetch(`${baseUrl}/api/collections/pages/home`).then((response) =>
+        await fetch(`${baseUrl}/api/collections/pages/${HOME_ID}`).then((response) =>
           response.json()
         )
       ).properties.title,
@@ -556,7 +559,7 @@ test("rejects media-folder changes without an explicit offline migration", async
     );
     await fs.mkdir(path.dirname(mediaSentinel), { recursive: true });
     await fs.writeFile(mediaSentinel, "keep");
-    next.site.media_folder = "content/assets";
+    next.node_types.page.fields.image.media_folder = "content/assets";
 
     const rejected = await putConfig(
       baseUrl,
@@ -564,7 +567,7 @@ test("rejects media-folder changes without an explicit offline migration", async
       loaded.headers.get("etag")
     );
     assert.equal(rejected.status, 400);
-    assert.match((await rejected.json()).message, /cannot change site\.media_folder/);
+    assert.match((await rejected.json()).message, /cannot remove media folder "content\/media" from collection "pages"/);
     assert.equal(await fs.readFile(configPath, "utf8"), originalConfig);
     assert.equal(await fs.readFile(mediaSentinel, "utf8"), "keep");
     await assert.rejects(
@@ -611,7 +614,8 @@ test("transactionally renames concrete schema keys, records, media, and cache na
     };
     await fs.writeFile(
       path.join(rootDir, "content", "pages", "home.yml"),
-      `id: home
+      `id: ${HOME_ID}
+filename: home
 type: page
 order: 0
 properties:
@@ -636,7 +640,8 @@ slots:
     );
     await fs.writeFile(
       path.join(rootDir, "content", "files", "manual.yml"),
-      `id: manual
+      `id: filemanual00001
+filename: manual
 type: download
 order: 0
 properties:
@@ -786,7 +791,8 @@ test("keeps GitHub media global while renaming collection records and cache keys
     const filePath = path.join(rootDir, "content", "files", "manual.yml");
     await fs.writeFile(
       filePath,
-      `id: manual
+      `id: filemanual00001
+filename: manual
 type: download
 order: 0
 properties:
@@ -883,7 +889,8 @@ test("renames remote aliases in local records without moving connector-owned sto
     const pagePath = path.join(rootDir, "content", "pages", "home.yml");
     await fs.writeFile(
       pagePath,
-      `id: home
+      `id: ${HOME_ID}
+filename: home
 type: page
 order: 0
 properties:
@@ -1048,7 +1055,8 @@ test("keeps new and moved empty API collections virtual until first write", asyn
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        id: "first",
+        id: "pagefirst000001",
+        filename: "first",
         type: "page",
         order: 0,
         properties: {
@@ -1238,10 +1246,10 @@ test("transactionally migrates record filenames when the YAML extension changes"
         fs.access(path.join(folder, "home.yml")),
         (error) => error.code === "ENOENT"
       );
-      assert.equal((await readYaml(path.join(folder, "home.yaml"))).id, "home");
+      assert.equal((await readYaml(path.join(folder, "home.yaml"))).id, HOME_ID);
       assert.equal(
         (
-          await fetch(`${baseUrl}/api/collections/${collectionName}/home`).then(
+          await fetch(`${baseUrl}/api/collections/${collectionName}/${HOME_ID}`).then(
             (response) => response.json()
           )
         ).properties.title,
@@ -1382,9 +1390,12 @@ test("preflights record identity, extension, and current schema before any renam
       prepare: async (rootDir) => {
         const recordPath = path.join(rootDir, "content", "pages", "home.yml");
         const source = await fs.readFile(recordPath, "utf8");
-        await fs.writeFile(recordPath, source.replace("id: home", "id: mismatch"));
+        await fs.writeFile(
+          recordPath,
+          source.replace("filename: home", "filename: mismatch")
+        );
       },
-      message: /id must match its filename stem/
+      message: /contains filename "mismatch"/
     },
     {
       name: "configured extension",
@@ -1395,7 +1406,9 @@ test("preflights record identity, extension, and current schema before any renam
         );
         await fs.writeFile(
           path.join(rootDir, "content", "pages", "rogue.yaml"),
-          source.replace("id: home", "id: rogue")
+          source
+            .replace(`id: ${HOME_ID}`, "id: pagerogue000001")
+            .replace("filename: home", "filename: rogue")
         );
       },
       message: /configured \.yml extension/
@@ -1603,7 +1616,8 @@ test("refuses a configured collection folder replaced by a symlink", async (t) =
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        id: "outside",
+        id: "pageoutside0001",
+        filename: "outside",
         type: "page",
         order: 0,
         properties: {
@@ -1699,7 +1713,7 @@ test("recovers in-place record rewrites before, during, and after the config com
       const configFile = path.join(rootDir, "cms.config.yml");
       const oldSource = await fs.readFile(configFile, "utf8");
       const newSource = oldSource.replace(
-        "site:\n",
+        "site: {}\n",
         "site:\n  name: Recovered schema\n"
       );
       const pages = path.join(rootDir, "content", "pages");
@@ -1978,7 +1992,7 @@ test("stores remote aliases without treating them as local collections", async (
       ["PUT", "/api/collections/central_images/example"],
       ["DELETE", "/api/collections/central_images/example"],
       ["POST", "/api/collections/central_images/example/rename"],
-      ["POST", "/api/media/central_images?filename=example.png&widget=image"]
+      ["POST", "/api/media/central_images?filename=example.png&widget=image&media_folder=content%2Fmedia"]
     ];
     for (const [method, pathname] of requests) {
       const response = await fetch(`${baseUrl}${pathname}`, {
@@ -2044,7 +2058,7 @@ test("deduplicates uploads by hash while preserving each cosmetic filename", asy
       }
     }).png().toBuffer();
     const upload = () =>
-      fetch(`${baseUrl}/api/media/pages?filename=${encodeURIComponent("Hero Image.png")}&widget=image`, {
+      fetch(`${baseUrl}/api/media/pages?filename=${encodeURIComponent("Hero Image.png")}&widget=image&media_folder=content%2Fmedia`, {
         method: "POST",
         headers: { "content-type": "image/png" },
         body: contents
@@ -2064,7 +2078,7 @@ test("deduplicates uploads by hash while preserving each cosmetic filename", asy
     );
 
     const second = await fetch(
-      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Another Name.png")}&widget=image`,
+      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Another Name.png")}&widget=image&media_folder=content%2Fmedia`,
       {
         method: "POST",
         headers: { "content-type": "image/png" },
@@ -2099,7 +2113,7 @@ test("deduplicates uploads by hash while preserving each cosmetic filename", asy
     const maximumName = `${"a".repeat(251)}.png`;
     const uploadMaximumName = () =>
       fetch(
-        `${baseUrl}/api/media/pages?filename=${encodeURIComponent(maximumName)}&widget=image`,
+        `${baseUrl}/api/media/pages?filename=${encodeURIComponent(maximumName)}&widget=image&media_folder=content%2Fmedia`,
         {
           method: "POST",
           headers: { "content-type": "image/png" },
@@ -2135,7 +2149,7 @@ test("publishes concurrent first uploads after racing to create the media root",
     const responses = await Promise.all(
       Array.from({ length: 8 }, (_, index) =>
         fetch(
-          `${baseUrl}/api/media/pages?filename=first-${index}.png&widget=image`,
+          `${baseUrl}/api/media/pages?filename=first-${index}.png&widget=image&media_folder=content%2Fmedia`,
           {
             method: "POST",
             headers: { "content-type": "image/png" },
@@ -2175,7 +2189,7 @@ test("development mirrors GitHub media layout and requires a duplicate choice", 
     }).png().toBuffer();
     const hash = sha256(body);
     const upload = (duplicate) => fetch(
-      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Hero Image.png")}&widget=image${
+      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Hero Image.png")}&widget=image&media_folder=content%2Fmedia${
         duplicate ? `&duplicate=${duplicate}` : ""
       }`,
       {
@@ -2190,7 +2204,7 @@ test("development mirrors GitHub media layout and requires a duplicate choice", 
     assert.deepEqual(await first.json(), {
       filename: "Hero Image.png",
       hash,
-      path: `/media/${hash}/Hero%20Image.png`,
+      path: `content/media/${hash}/Hero%20Image.png`,
       storage_path: `content/media/${hash}/Hero Image.png`,
       reused: false
     });
@@ -2229,7 +2243,7 @@ test("development mirrors GitHub media layout and requires a duplicate choice", 
       }
     }).png().toBuffer();
     const dotUpload = await fetch(
-      `${baseUrl}/api/media/pages?filename=.hero.png&widget=image`,
+      `${baseUrl}/api/media/pages?filename=.hero.png&widget=image&media_folder=content%2Fmedia`,
       {
         method: "POST",
         headers: { "content-type": "image/png" },
@@ -2238,7 +2252,14 @@ test("development mirrors GitHub media layout and requires a duplicate choice", 
     );
     assert.equal(dotUpload.status, 201);
     const dotDescriptor = await dotUpload.json();
-    assert.equal((await fetch(`${baseUrl}${dotDescriptor.path}`)).status, 200);
+    assert.equal(
+      dotDescriptor.path,
+      `content/media/${dotDescriptor.hash}/.hero.png`
+    );
+    assert.equal(
+      (await fetch(`${baseUrl}/media/${dotDescriptor.hash}/.hero.png`)).status,
+      200
+    );
     const conflict = await upload();
     assert.equal(conflict.status, 409);
     const choices = await conflict.json();
@@ -2275,7 +2296,7 @@ test("GitHub duplicate choices reject decomposed existing filenames", async () =
     await fs.mkdir(directory, { recursive: true });
     await fs.writeFile(path.join(directory, "Cafe\u0301.png"), body);
     const upload = (duplicate) => fetch(
-      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Café.png")}&widget=image${
+      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Café.png")}&widget=image&media_folder=content%2Fmedia${
         duplicate ? `&duplicate=${duplicate}` : ""
       }`,
       {
@@ -2309,7 +2330,7 @@ test("refuses a pre-existing API asset whose bytes do not match its hash directo
     await fs.mkdir(directory, { recursive: true });
     await fs.writeFile(path.join(directory, "asset.dat"), "wrong bytes");
     const response = await fetch(
-      `${baseUrl}/api/media/pages?filename=valid.png&widget=image`,
+      `${baseUrl}/api/media/pages?filename=valid.png&widget=image&media_folder=content%2Fmedia`,
       {
         method: "POST",
         headers: { "content-type": "image/png" },
@@ -2352,6 +2373,7 @@ test("requires an upload widget and keeps mixed file acceptance out of image upl
     const config = await configResponse.json();
     config.node_types.page.fields.attachment = {
       widget: "file",
+      media_folder: "content/media",
       accept: ["*/*"]
     };
     assert.equal(
@@ -2359,7 +2381,7 @@ test("requires an upload widget and keeps mixed file acceptance out of image upl
       200
     );
     const rejectedImage = await fetch(
-      `${baseUrl}/api/media/pages?filename=notes.pdf&widget=image`,
+      `${baseUrl}/api/media/pages?filename=notes.pdf&widget=image&media_folder=content%2Fmedia`,
       {
         method: "POST",
         headers: { "content-type": "application/pdf" },
@@ -2369,7 +2391,7 @@ test("requires an upload widget and keeps mixed file acceptance out of image upl
     assert.equal(rejectedImage.status, 400);
     assert.match((await rejectedImage.json()).message, /image\/png/);
     const acceptedFile = await fetch(
-      `${baseUrl}/api/media/pages?filename=notes.pdf&widget=file`,
+      `${baseUrl}/api/media/pages?filename=notes.pdf&widget=file&media_folder=content%2Fmedia`,
       {
         method: "POST",
         headers: { "content-type": "application/pdf" },
@@ -2401,7 +2423,7 @@ test("cleans only service-owned upload temporaries before the first upload", asy
     }).png().toBuffer();
 
     const response = await fetch(
-      `${baseUrl}/api/media/pages?filename=clean.png&widget=image`,
+      `${baseUrl}/api/media/pages?filename=clean.png&widget=image&media_folder=content%2Fmedia`,
       {
         method: "POST",
         headers: { "content-type": "image/png" },
@@ -2422,7 +2444,7 @@ test("rejects unsafe upload filenames before writing a temporary file", async ()
       `${"a".repeat(256)}.png`
     ]) {
       const response = await fetch(
-        `${baseUrl}/api/media/pages?filename=${encodeURIComponent(filename)}&widget=image`,
+        `${baseUrl}/api/media/pages?filename=${encodeURIComponent(filename)}&widget=image&media_folder=content%2Fmedia`,
         {
           method: "POST",
           headers: { "content-type": "image/png" },
@@ -2456,7 +2478,7 @@ test("validates upload collections before reading or publishing media", async (t
       }
     }).png().toBuffer();
     const unknown = await fetch(
-      `${baseUrl}/api/media/missing?filename=hero.png&widget=image`,
+      `${baseUrl}/api/media/missing?filename=hero.png&widget=image&media_folder=content%2Fmedia`,
       {
         method: "POST",
         headers: { "content-type": "image/png" },
@@ -2480,7 +2502,7 @@ test("validates upload collections before reading or publishing media", async (t
     }
 
     const linked = await fetch(
-      `${baseUrl}/api/media/pages?filename=hero.png&widget=image`,
+      `${baseUrl}/api/media/pages?filename=hero.png&widget=image&media_folder=content%2Fmedia`,
       {
         method: "POST",
         headers: { "content-type": "image/png" },
@@ -2502,7 +2524,7 @@ test("uploads only configured image formats, including TIF and TIFF", async () =
   await withServer(async (baseUrl, rootDir) => {
     const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1" />';
     const accepted = await fetch(
-      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Diagram.svg")}&widget=image`,
+      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Diagram.svg")}&widget=image&media_folder=content%2Fmedia`,
       {
         method: "POST",
         headers: { "content-type": "image/svg+xml" },
@@ -2536,7 +2558,7 @@ test("uploads only configured image formats, including TIF and TIFF", async () =
       ["Archive.tiff", "application/octet-stream"]
     ]) {
       const tiff = await fetch(
-        `${baseUrl}/api/media/pages?filename=${encodeURIComponent(filename)}&widget=image`,
+        `${baseUrl}/api/media/pages?filename=${encodeURIComponent(filename)}&widget=image&media_folder=content%2Fmedia`,
         {
           method: "POST",
           headers: { "content-type": contentType },
@@ -2572,7 +2594,7 @@ test("uploads only configured image formats, including TIF and TIFF", async () =
       ["mentioned-vector.svg", "image/svg+xml", Buffer.from("notes <svg />")]
     ]) {
       const mismatch = await fetch(
-        `${baseUrl}/api/media/pages?filename=${encodeURIComponent(filename)}&widget=image`,
+        `${baseUrl}/api/media/pages?filename=${encodeURIComponent(filename)}&widget=image&media_folder=content%2Fmedia`,
         {
           method: "POST",
           headers: { "content-type": contentType },
@@ -2593,7 +2615,7 @@ test("uploads only configured image formats, including TIF and TIFF", async () =
     const savedVectorOnlyConfig = await putConfig(baseUrl, vectorOnlyConfig);
     assert.equal(savedVectorOnlyConfig.status, 200);
     const spoofedMime = await fetch(
-      `${baseUrl}/api/media/pages?filename=spoofed.png&widget=image`,
+      `${baseUrl}/api/media/pages?filename=spoofed.png&widget=image&media_folder=content%2Fmedia`,
       {
         method: "POST",
         headers: { "content-type": "image/svg+xml" },
@@ -2604,7 +2626,7 @@ test("uploads only configured image formats, including TIF and TIFF", async () =
     assert.match((await spoofedMime.json()).message, /image\/svg\+xml/);
 
     const rejected = await fetch(
-      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Photo.jpg")}&widget=image`,
+      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Photo.jpg")}&widget=image&media_folder=content%2Fmedia`,
       {
         method: "POST",
         headers: { "content-type": "image/jpeg" },
@@ -2622,7 +2644,7 @@ test("uploads only configured image formats, including TIF and TIFF", async () =
 test("uploads generic files when a file field accepts all MIME types", async () => {
   await withServer(async (baseUrl, rootDir) => {
     const rejectedByPages = await fetch(
-      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Research notes.pdf")}&widget=file`,
+      `${baseUrl}/api/media/pages?filename=${encodeURIComponent("Research notes.pdf")}&widget=file&media_folder=content%2Fmedia`,
       {
         method: "POST",
         headers: { "content-type": "application/pdf" },
@@ -2632,7 +2654,7 @@ test("uploads generic files when a file field accepts all MIME types", async () 
     assert.equal(rejectedByPages.status, 400);
 
     const uploaded = await fetch(
-      `${baseUrl}/api/media/files?filename=${encodeURIComponent("Research notes.pdf")}&widget=file`,
+      `${baseUrl}/api/media/files?filename=${encodeURIComponent("Research notes.pdf")}&widget=file&media_folder=content%2Fmedia`,
       {
         method: "POST",
         headers: { "content-type": "application/pdf" },
@@ -2665,7 +2687,8 @@ test("uploads generic files when a file field accepts all MIME types", async () 
 test("persists a complete record as YAML and reads it back", async () => {
   await withServer(async (baseUrl, rootDir) => {
     const record = {
-      id: "new-page",
+      id: "pagenew00000001",
+      filename: "new-page",
       type: "page",
       order: 1,
       properties: {
@@ -2689,7 +2712,7 @@ test("persists a complete record as YAML and reads it back", async () => {
     assert.equal(created.status, 201);
 
     record.properties.title = "Changed";
-    const saved = await fetch(`${baseUrl}/api/collections/pages/new-page`, {
+    const saved = await fetch(`${baseUrl}/api/collections/pages/pagenew00000001`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(record)
@@ -2705,46 +2728,70 @@ test("persists a complete record as YAML and reads it back", async () => {
   });
 });
 
-test("renames a record file and updates its stored id", async () => {
+test("renames a record file without changing its id", async () => {
   await withServer(async (baseUrl, rootDir) => {
-    const renamed = await fetch(`${baseUrl}/api/collections/pages/home/rename`, {
+    const renamed = await fetch(`${baseUrl}/api/collections/pages/${HOME_ID}/rename`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: "renamed-home" })
+      body: JSON.stringify({ filename: "renamed-home" })
     });
     assert.equal(renamed.status, 200);
     const result = await renamed.json();
-    assert.equal(result.record.id, "renamed-home");
-    assert.equal(result.item.id, "renamed-home");
+    assert.equal(result.record.id, HOME_ID);
+    assert.equal(result.record.filename, "renamed-home");
+    assert.equal(result.item.id, HOME_ID);
+    assert.equal(result.item.filename, "renamed-home");
 
-    const oldRecord = await fetch(`${baseUrl}/api/collections/pages/home`);
-    assert.equal(oldRecord.status, 404);
-    const newRecord = await fetch(
-      `${baseUrl}/api/collections/pages/renamed-home`
+    const record = await fetch(
+      `${baseUrl}/api/collections/pages/${HOME_ID}`
     ).then((response) => response.json());
-    assert.equal(newRecord.id, "renamed-home");
+    assert.equal(record.filename, "renamed-home");
+    await assert.rejects(
+      fs.access(path.join(rootDir, "content", "pages", "home.yml"))
+    );
 
     const source = await fs.readFile(
       path.join(rootDir, "content", "pages", "renamed-home.yml"),
       "utf8"
     );
-    assert.match(source, /^id: renamed-home$/m);
+    assert.match(source, new RegExp(`^id: ${HOME_ID}\nfilename: renamed-home$`, "m"));
 
     await fs.writeFile(
       path.join(rootDir, "content", "pages", "taken.yml"),
-      source.replace("id: renamed-home", "id: taken"),
+      source
+        .replace(`id: ${HOME_ID}`, "id: pagetaken000001")
+        .replace("filename: renamed-home", "filename: taken"),
       "utf8"
     );
     const collision = await fetch(
-      `${baseUrl}/api/collections/pages/renamed-home/rename`,
+      `${baseUrl}/api/collections/pages/${HOME_ID}/rename`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: "taken" })
+        body: JSON.stringify({ filename: "taken" })
       }
     );
     assert.equal(collision.status, 409);
     assert.match((await collision.json()).message, /already exists/);
+
+    const duplicate = await fetch(`${baseUrl}/api/collections/pages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...record, filename: "another-file" })
+    });
+    assert.equal(duplicate.status, 409);
+    assert.match((await duplicate.json()).message, /already exists/);
+
+    await fs.writeFile(
+      path.join(rootDir, "content", "pages", "mismatch.yml"),
+      source
+        .replace(`id: ${HOME_ID}`, "id: pagemismatch01")
+        .replace("filename: renamed-home", "filename: elsewhere"),
+      "utf8"
+    );
+    const mismatched = await fetch(`${baseUrl}/api/collections/pages`);
+    assert.equal(mismatched.status, 409);
+    assert.match((await mismatched.json()).message, /contains filename "elsewhere"/);
   });
 });
 
@@ -2754,7 +2801,8 @@ test("rejects child types that are not allowed by a slot", async () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        id: "bad-page",
+        id: "pagebad00000001",
+        filename: "bad-page",
         type: "page",
         properties: { title: "Bad" },
         slots: {
@@ -2790,18 +2838,19 @@ test("deletes leaf records and their configured uploads but refuses to orphan ch
       "child-image",
       "utf8"
     );
-    const home = await fetch(`${baseUrl}/api/collections/pages/home`).then(
+    const home = await fetch(`${baseUrl}/api/collections/pages/${HOME_ID}`).then(
       (response) => response.json()
     );
     home.properties.image = { hash: childHash, filename: "child-2.png" };
-    const savedHome = await fetch(`${baseUrl}/api/collections/pages/home`, {
+    const savedHome = await fetch(`${baseUrl}/api/collections/pages/${HOME_ID}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(home)
     });
     assert.equal(savedHome.status, 200);
     const child = {
-      id: "child-page",
+      id: "pagechild000001",
+      filename: "child-page",
       type: "page",
       order: 1,
       properties: {
@@ -2821,24 +2870,24 @@ test("deletes leaf records and their configured uploads but refuses to orphan ch
     assert.equal(created.status, 201);
     assert.equal((await created.json()).item.hidden, true);
 
-    const parentDelete = await fetch(`${baseUrl}/api/collections/pages/home`, {
+    const parentDelete = await fetch(`${baseUrl}/api/collections/pages/${HOME_ID}`, {
       method: "DELETE"
     });
     assert.equal(parentDelete.status, 409);
     assert.match((await parentDelete.json()).message, /child records/);
 
-    const childDelete = await fetch(`${baseUrl}/api/collections/pages/child-page`, {
+    const childDelete = await fetch(`${baseUrl}/api/collections/pages/pagechild000001`, {
       method: "DELETE"
     });
     assert.equal(childDelete.status, 204);
 
-    const missing = await fetch(`${baseUrl}/api/collections/pages/child-page`);
+    const missing = await fetch(`${baseUrl}/api/collections/pages/pagechild000001`);
     assert.equal(missing.status, 404);
     assert.equal(
       await fs.readFile(path.join(childDirectory, "asset.dat"), "utf8"),
       "child-image"
     );
-    const homeDelete = await fetch(`${baseUrl}/api/collections/pages/home`, {
+    const homeDelete = await fetch(`${baseUrl}/api/collections/pages/${HOME_ID}`, {
       method: "DELETE"
     });
     assert.equal(homeDelete.status, 204);
@@ -2883,7 +2932,8 @@ test("record deletion never follows a linked media file", async (t) => {
     }
 
     const record = {
-      id: "linked-page",
+      id: "pagelinked00001",
+      filename: "linked-page",
       type: "page",
       order: 1,
       properties: {
@@ -2907,7 +2957,7 @@ test("record deletion never follows a linked media file", async (t) => {
     );
     assert.equal(
       (
-        await fetch(`${baseUrl}/api/collections/pages/linked-page`, {
+        await fetch(`${baseUrl}/api/collections/pages/pagelinked00001`, {
           method: "DELETE"
         })
       ).status,

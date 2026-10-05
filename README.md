@@ -46,8 +46,6 @@ Configure the project-owned defaults in `cms.config.yml`:
 
 ```yaml
 site:
-  media_folder: content/media
-  public_folder: /media
   image_processing:
     width: 2400
     height: 2400
@@ -181,53 +179,52 @@ Uploads remain authenticated. They are streamed into an exclusive temporary
 file with the configured byte bound while the service computes SHA-256. The
 browser's NFC-normalized original basename is returned unchanged together with
 the computed `hash`. An API-owned project atomically publishes the bytes once
-as `<media-folder>/<collection>/<sha256>/asset.dat`; another upload with the
+as `<field media_folder>/<collection>/<sha256>/asset.dat`; another upload with the
 same hash silently reuses that verified file while retaining the new record's
 filename. A GitHub-owned development checkout instead publishes
-`<media-folder>/<sha256>/<original-filename>`. A duplicate hash returns a choice
+`<field media_folder>/<sha256>/<original-filename>` and returns that encoded
+repository path. A duplicate hash returns a choice
 between the existing file and a collision-safe suffixed copy so local data
 remains directly committable to GitHub. Before the first upload, the service
 replica removes only its strictly named temporary files left by an interrupted
 prior process.
 
-Every upload declares `widget=image|file`; missing or unknown values are
-rejected. Accepted types come only from matching upload fields reachable from
-the named collection, including nested slot types. Image uploads are checked from their
+Every upload declares `widget=image|file` and the field's
+`media_folder`; missing or unknown values are rejected. Accepted types come
+only from upload fields of that widget and media folder reachable from the
+named collection, including nested slot types. Image uploads are checked from their
 bytes before publication and must match their filename extension; generic file
 rules in another collection cannot authorize them. The browser never supplies
 the hash, and huge originals are never buffered into the Node.js heap.
 
-### One-time image migration
+### One-time record identity migration
 
-The strict image value is `{hash, filename}` plus optional annotation fields;
-runtime code does not parse the superseded scalar or `{src, ...}` forms. Before
-deploying this contract to an existing API-owned volume, stop the service and
-run a complete dry preflight, then the write with an absent backup directory
-outside the project root (its parent directory must already exist):
+Records are `{id, filename, type, order, properties, slots}`: `id` is an
+opaque generated `[a-z0-9]{15}` identity and `filename` is the readable YAML
+filename stem. Every `image` and `file` field declares its own
+`media_folder`; `site.media_folder` and `site.public_folder` are rejected.
+Before deploying this contract to an existing volume, stop the service and run
+a dry preflight, then the write with an absent backup directory outside the
+project root (its parent directory must already exist):
 
 ```sh
-node bin/migrate-image-assets.mjs --project-root /data \
-  --cache-dir /data/.cache --check
-node bin/migrate-image-assets.mjs --project-root /data --write \
-  --cache-dir /data/.cache \
-  --backup-dir /data-backups/minicms-images-before-asset-dat
-node bin/migrate-image-assets.mjs --project-root /data \
-  --cache-dir /data/.cache --check
+node bin/migrate-record-identity.mjs --project-root /data --check
+node bin/migrate-record-identity.mjs --project-root /data --write \
+  --backup-dir /data-backups/minicms-before-record-identity
+node bin/migrate-record-identity.mjs --project-root /data --check
 ```
 
-The command verifies every regular source against its hash before writing,
-backs up every changed YAML and removed old source, links one `asset.dat` per
-hash atomically, rewrites records, verifies the strict result, removes old
-filenames, and clears only the preflighted derivative-cache contents. It is
-idempotent. Cache and backup containment checks use resolved physical paths,
-so symlinked parents cannot redirect cleanup into `content/`, make the cache
-contain the project, or place the backup inside either protected tree. A
-project-local cache such as `/data/.cache` remains valid because it is outside
-`content/`; a backup must be outside the complete project. A failure must keep
-the service stopped; restore the paths listed in the backup manifest before
-retrying. The
-derivative cache is disposable and should be cleared once because old
-basename-specific entries are no longer used.
+A collection whose `hierarchy.id_field` or `views.reference.value` named a
+generated-ID field (for example `content_id`) promotes that value to the record
+`id` and drops the field from the schema; other records receive a fresh
+generated ID. The previous record id becomes `filename`, so no file moves.
+References, tags, hierarchy parents, and canonical `minicms://` destinations
+that pointed at readable ids are rewritten, `site.media_folder` moves onto
+every local upload field, and GitHub-storage file values become repository
+paths. Every result is validated before the first write; the backup contains
+each changed file plus `id-map.json`. The command is idempotent. A slug
+template that uses the promoted field must be changed first. References into
+remote connector collections are left unchanged; migrate those owners first.
 
 ## Production
 
@@ -384,13 +381,13 @@ same-key local collection changes, that PUT copies its existing folder to the
 absent destination. Explicit one-to-one key renames additionally rewrite root
 and nested record types, canonical inline references, and canonical API file
 URLs. Concrete collection renames move the target-configured content folder and
-`content/media/<collection>` namespace; structured image values stay unchanged.
+each `<field media_folder>/<collection>` namespace; structured image values stay unchanged.
 Changing a continuing collection between `yml` and `yaml` migrates every record
 filename and rejects occupied destination paths.
 GitHub-development media keeps its global hash namespace during collection
 renames. Configuration saves cannot change between API and GitHub media storage
-layouts or change `site.media_folder`; either requires a separate offline
-migration.
+layouts or remove a media folder still used by a continuing collection; either
+requires a separate offline migration.
 Remote-alias renames preserve their connector identity and never move remote
 storage. Every affected source record, filename, destination, and resulting
 record is preflighted before the first write. The transaction then atomically
