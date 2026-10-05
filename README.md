@@ -278,8 +278,13 @@ contain `cms.config.yml` and `content/`:
 ```
 
 Compose mounts that directory at `/data` and keeps the image cache below
-`/data/.cache`. The readiness healthcheck validates both the project and image
-configuration. Use exactly one running replica for this writable volume;
+`/data/.cache`. The mounted directory itself and `content/` must be owned by
+(or writable for) `1000:1000` too, not only the collection folders: config
+saves write a temporary file next to `cms.config.yml` and their transaction
+journal in the project root, and folder moves create directories below
+`content/`. The readiness healthcheck validates the project and image
+configuration and that both directories are writable, so a misowned volume
+shows as an unhealthy container instead of failing Settings saves. Use exactly one running replica for this writable volume;
 overlapping rolling replacements are not safe.
 
 Run one service replica per writable project root. Bearer sessions, write

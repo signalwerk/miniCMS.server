@@ -1,6 +1,6 @@
 import express from "express";
 import path from "node:path";
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import {
   imageAssetMediaPath,
   mediaAcceptErrorMessage,
@@ -397,8 +397,17 @@ export function createApp({
     try {
       const config = await getConfig();
       imageService.validateProjectConfiguration(config);
+      // Config saves write next to cms.config.yml and folder moves create
+      // directories below content/, so both must be writable by this process.
+      await fs.access(rootDir, fsConstants.W_OK);
+      await fs.access(contentRoot, fsConstants.W_OK);
       response.json({ ok: true });
-    } catch {
+    } catch (error) {
+      if (error?.code === "EACCES") {
+        console.error(
+          `Project root is not writable by uid ${process.getuid?.()}: ${error.path}`
+        );
+      }
       response.status(503).json({ ok: false });
     }
   });

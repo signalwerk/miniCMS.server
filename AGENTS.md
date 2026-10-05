@@ -74,8 +74,10 @@ same change unless backward compatibility is explicitly requested.
 - `Dockerfile` is the production image boundary. `docker-compose.yml` is
   Coolify-ready, exposes only container port 8787, and mounts the single
   durable project root from `/DATA/miniCMS/backend/data` to `/data`. The
-  runtime is non-root with a read-only container filesystem; only `/data` and
-  the bounded `/tmp` tmpfs are writable.
+  runtime is non-root (UID 1000) with a read-only container filesystem; only
+  `/data` and the bounded `/tmp` tmpfs are writable. The project root and
+  `content/` themselves must be writable by UID 1000 (config saves and folder
+  moves create files there); `/api/ready` fails otherwise.
 
 ## Security invariants
 

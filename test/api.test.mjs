@@ -2038,6 +2038,23 @@ test("rejects unknown detail field references in configuration", async () => {
   });
 });
 
+test("reports not ready when the project content root is not writable", {
+  skip: process.getuid?.() === 0 && "root bypasses directory permissions"
+}, async () => {
+  await withServer(async (baseUrl, rootDir) => {
+    assert.equal((await fetch(`${baseUrl}/api/ready`)).status, 200);
+    const contentRoot = path.join(rootDir, "content");
+    await fs.chmod(contentRoot, 0o555);
+    try {
+      const readiness = await fetch(`${baseUrl}/api/ready`);
+      assert.equal(readiness.status, 503);
+      assert.deepEqual(await readiness.json(), { ok: false });
+    } finally {
+      await fs.chmod(contentRoot, 0o755);
+    }
+  });
+});
+
 test("deduplicates uploads by hash while preserving each cosmetic filename", async () => {
   await withServer(async (baseUrl, rootDir) => {
     const contents = await sharp({
