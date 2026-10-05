@@ -31,6 +31,7 @@ import {
   resolveMediaSource
 } from "./image/service.mjs";
 import { createMediaRouter } from "./image/routes.mjs";
+import { createAdminRouter } from "./admin.mjs";
 import {
   cleanUploadTemporaries,
   mediaUploadLimit,
@@ -405,6 +406,14 @@ export function createApp({
   // Media stays public even when a configured image schema is "api". Mount
   // its exact GET/HEAD routes before the broader authenticated API namespace.
   app.use(createMediaRouter({ imageService, getConfig }));
+  app.use(
+    createAdminRouter({
+      configFile,
+      ...(environment.MINICMS_ADMIN_SCRIPT_URL
+        ? { scriptUrl: environment.MINICMS_ADMIN_SCRIPT_URL }
+        : {})
+    })
+  );
 
   app.use("/api/auth", authentication.router);
   app.use("/api", authentication.requireSession);

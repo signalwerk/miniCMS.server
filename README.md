@@ -228,6 +228,17 @@ each changed file plus `id-map.json`. The command is idempotent. A slug
 template that uses the promoted field must be changed first. References into
 remote connector collections are left unchanged; migrate those owners first.
 
+## Built-in editor
+
+Every deployment also serves its own editor at `/admin/` (for example
+`https://media.signalwerk.ch/admin/`). The page loads the published miniCMS
+bundle and bootstraps from `/admin/cms.config.yml`, which is the project's
+`cms.config.yml`. Its `connectors.default` must be this service's API
+connector (`api_url` plus the central `auth_url`), and the auth worker must
+allow the service origin. Set `MINICMS_ADMIN_SCRIPT_URL` to pin an immutable
+bundle instead of the latest build. The bootstrap config is public; keep
+secrets out of it.
+
 ## Production
 
 `npm start` always enables authentication and fails before listening unless

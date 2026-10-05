@@ -18,6 +18,7 @@ services:
       MINICMS_SESSION_SECRET: "${MINICMS_SESSION_SECRET:?Set MINICMS_SESSION_SECRET}"
       MINICMS_READ_TOKEN: "${MINICMS_READ_TOKEN:-}"
       MINICMS_IMAGE_CACHE_DIR: /data/.cache
+      MINICMS_ADMIN_SCRIPT_URL: "${MINICMS_ADMIN_SCRIPT_URL:-}"
     volumes:
       - "/DATA/miniCMS/backend/data:/data"
     tmpfs:

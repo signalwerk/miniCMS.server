@@ -31,6 +31,13 @@ same change unless backward compatibility is explicitly requested.
   contract, `service.mjs` owns safe source resolution/processing/cache, and
   `routes.mjs` owns HTTP semantics. Never hand-build or reparse image URLs;
   import `@signalwerk/minicms/core/image-service`.
+- `src/admin.mjs` hosts the service's own editor at `/admin/`: a static page
+  that loads the published miniCMS bundle (`MINICMS_ADMIN_SCRIPT_URL`,
+  default `https://signalwerk.github.io/miniCMS/minicms.js`) and bootstraps from
+  `/admin/cms.config.yml`, the project's raw config. That bootstrap file is
+  deliberately public, like every static consumer's `admin/cms.config.yml`, so
+  the config must never contain secrets; sign-in uses the config's API
+  connector and every content read or write stays behind `/api`.
 - `src/upload.mjs` streams authenticated uploads to an exclusive temporary
   file and atomically publishes them without buffering originals in memory.
 - `bin/minicms-api.mjs` starts either the loopback-only unauthenticated `dev`

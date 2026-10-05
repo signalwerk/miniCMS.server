@@ -258,6 +258,29 @@ test("development session stays locally authenticated without a login", async ()
   }
 });
 
+test("production serves its own public admin host while content stays protected", async () => {
+  await withProductionServer(async ({ baseUrl, rootDir }) => {
+    const redirect = await fetch(`${baseUrl}/admin`, { redirect: "manual" });
+    assert.equal(redirect.status, 301);
+    assert.equal(redirect.headers.get("location"), "/admin/");
+
+    const page = await fetch(`${baseUrl}/admin/`);
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get("content-type"), /text\/html/);
+    const html = await page.text();
+    assert.match(html, /<script src="https:\/\/signalwerk\.github\.io\/miniCMS\/minicms\.js"><\/script>/);
+    assert.match(html, /configUrl: "cms\.config\.yml"/);
+
+    const config = await fetch(`${baseUrl}/admin/cms.config.yml`);
+    assert.equal(config.status, 200);
+    assert.equal(
+      await config.text(),
+      await fs.readFile(path.join(rootDir, "cms.config.yml"), "utf8")
+    );
+    assert.equal((await fetch(`${baseUrl}/api/config`)).status, 401);
+  });
+});
+
 test("anonymous production requests cannot read or mutate content", async () => {
   await withProductionServer(async ({ baseUrl, rootDir }) => {
     assert.equal((await fetch(`${baseUrl}/api/health`)).status, 200);
