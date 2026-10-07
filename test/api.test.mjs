@@ -2960,3 +2960,18 @@ test("record deletion never follows a linked media file", async (t) => {
     assert.equal(await fs.readFile(outside, "utf8"), "outside");
   });
 });
+
+test("admin uses an immutable editor fallback for missing or empty URL settings", async () => {
+  for (const value of [undefined, ""]) {
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/`);
+      assert.equal(response.status, 200);
+      const html = await response.text();
+      assert.match(html, /src="https:\/\/rawcdn\.githack\.com\/signalwerk\/miniCMS\/[a-f0-9]{40}\/minicms\.js"/);
+    }, { environment: value === undefined ? {} : { MINICMS_ADMIN_SCRIPT_URL: value } });
+  }
+  await withServer(async (baseUrl) => {
+    const html = await fetch(`${baseUrl}/admin/`).then(response => response.text());
+    assert.ok(html.includes('src="https://editor.example.com/minicms.js"'));
+  }, { environment: { MINICMS_ADMIN_SCRIPT_URL: "https://editor.example.com/minicms.js" } });
+});

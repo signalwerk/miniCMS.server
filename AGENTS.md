@@ -33,7 +33,7 @@ same change unless backward compatibility is explicitly requested.
   import `@signalwerk/minicms/core/image-service`.
 - `src/admin.mjs` hosts the service's own editor at `/admin/`: a static page
   that loads the published miniCMS bundle (`MINICMS_ADMIN_SCRIPT_URL`,
-  default `https://signalwerk.github.io/miniCMS/minicms.js`) and bootstraps from
+  default pinned to an immutable rawcdn.githack.com bundle) and bootstraps from
   `/admin/cms.config.yml`, the project's raw config. That bootstrap file is
   deliberately public, like every static consumer's `admin/cms.config.yml`, so
   the config must never contain secrets; sign-in uses the config's API
@@ -83,10 +83,11 @@ same change unless backward compatibility is explicitly requested.
   the existing flatten operation before its normal resize/quality operations;
   no new API route or server-side default is needed. Preserve other libraries'
   rendering settings when configuring OSPAAAL's white background.
-- Compose pins its default `MINICMS_ADMIN_SCRIPT_URL` to the immutable published
-  browser bundle. Bump this URL together with the immutable shared-core package
-  dependency after the miniCMS publication workflow succeeds. An explicit
-  deployment environment override still takes precedence.
+- `src/admin.mjs` pins the default browser bundle to an immutable published
+  URL. Bump this URL together with the immutable shared-core package dependency
+  after the miniCMS publication workflow succeeds. Non-empty
+  `MINICMS_ADMIN_SCRIPT_URL` overrides it; an empty Coolify setting uses the
+  pinned fallback (Coolify may replace Compose's environment defaults).
 
 ## Security invariants
 

@@ -235,9 +235,9 @@ Every deployment also serves its own editor at `/admin/` (for example
 bundle and bootstraps from `/admin/cms.config.yml`, which is the project's
 `cms.config.yml`. Its `connectors.default` must be this service's API
 connector (`api_url` plus the central `auth_url`), and the auth worker must
-allow the service origin. Compose defaults to an immutable bundle pin, updated
-together with the shared-core dependency. Set `MINICMS_ADMIN_SCRIPT_URL` to
-override that pin; running outside Compose defaults to the latest build.
+allow the service origin. The built-in editor defaults to an immutable bundle
+pin, updated together with the shared-core dependency. Set
+`MINICMS_ADMIN_SCRIPT_URL` to override that pin.
 The bootstrap config is public; keep
 secrets out of it.
 
