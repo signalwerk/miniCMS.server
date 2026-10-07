@@ -778,6 +778,10 @@ function validateOutputDimensions(metadata, operations, operational) {
   let dimensions = orientedDimensions(metadata);
   for (let index = 0; index < operations.length; index += 1) {
     const operation = operations[index];
+    // Flatten changes channels/background, not geometry. Its full-size input
+    // is governed by maxInputPixels; a subsequent resize may yield a small
+    // derivative. Still validate geometry operations and the final output.
+    if (operation.type === "flatten") continue;
     if (operation.type === "crop") {
       const resize =
         operations[index + 1]?.type === "resize" &&
@@ -815,6 +819,9 @@ function validateOutputDimensions(metadata, operations, operational) {
     if (dimensionsExceedOperationalLimits(dimensions, operational)) {
       throw sourceError(413, "The requested image operation is too large.");
     }
+  }
+  if (dimensionsExceedOperationalLimits(dimensions, operational)) {
+    throw sourceError(413, "The requested image operation is too large.");
   }
   return dimensions;
 }

@@ -328,3 +328,14 @@ and rollback-safe file deletion.
   supports bounded classic TIFF/BigTIFF directories in both byte orders and
   cleans temporary copies on success/failure. Keep cache schema `v2`: previous
   failed renders never published a derivative, and successful pixels are unchanged.
+
+- Flatten-before-resize validation must distinguish input and output budgets.
+  Gigapixel asset `0a39944119a5a9480d5b903074a995dc117101cf4dd53adf3befa7b692a70a8e`
+  is a 6084 × 8976 CMYK TIFF without alpha (54,609,984 input pixels). Its
+  width-800 derivative was wrongly rejected before resizing. Photometric
+  flatten operations now defer output dimension checks; geometry operations
+  and the final output remain bounded, and Sharp's finite input limit stays
+  enabled. Verify width-only thumbnails, edge/pixel budgets, and flatten-only
+  oversized outputs. All 98 server tests passed; local Docker returned fresh
+  and cached 800 × 1180 JPEGs matching the legacy transform exactly. Deploy
+  without raising input/output limits; keep the existing cache schema `v2`.

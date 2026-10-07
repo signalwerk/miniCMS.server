@@ -234,9 +234,15 @@ async function makeFixture(options = {}) {
     await fs.writeFile(path.join(mediaDir, "layered-cmyk.tif"),
       multichannelTiff(5, { masked: true, layersBytes: 30 * 1024 * 1024 }));
   }
+  if (options.largeRaster) {
+    await sharp({ create: { width: 512, height: 256, channels: 4,
+      background: { r: 220, g: 30, b: 40, alpha: 0.25 } } })
+      .png().toFile(path.join(mediaDir, "large-alpha.png"));
+  }
   const media = {};
   for (const [key, sourcePath, filename, collection = "images"] of [
     ...(options.largeLayerData ? [["layeredCmyk", path.join(mediaDir, "layered-cmyk.tif"), "layered-cmyk.tif"]] : []),
+    ...(options.largeRaster ? [["largeAlpha", path.join(mediaDir, "large-alpha.png"), "large-alpha.png"]] : []),
     ["photo", path.join(mediaDir, "photo.jpg"), "photo.jpg"],
     ["pattern", path.join(mediaDir, "pattern.png"), "pattern.png"],
     ["tagged", path.join(mediaDir, "tagged.jpg"), "tagged.jpg"],
@@ -876,6 +882,53 @@ test("crops axis-aligned, right-angle, and fractional source regions", async () 
     assert.equal(crossingLocalBox.info.width, 40);
     assert.equal(crossingLocalBox.info.height, 20);
   });
+});
+
+test("flatten before resize accepts large sources but still bounds final output", async () => {
+  await withServer(async ({ baseUrl, config, media }) => {
+    // Width-only matches the reported URL. Source exceeds the edge limit.
+    for (const flatten of [{ alpha: "remove", background: "ffffff" }, { background: "ffffff" }]) {
+      const route = servicePath(media.scanTif.source, config, { format: "jpg", operations: [
+        { type: "flatten", options: flatten },
+        { type: "resize", options: { width: 32, fit: "inside" } }
+      ] });
+      const response = await fetch(`${baseUrl}${route}`);
+      assert.equal(response.status, 200);
+      const output = await sharp(Buffer.from(await response.arrayBuffer())).metadata();
+      assert.equal(output.width, 32);
+      assert.equal(output.height, 21);
+    }
+    for (const operations of [
+      [{ type: "flatten", options: { alpha: "remove", background: "ffffff" } }],
+      [{ type: "flatten", options: { background: "ffffff" } }, { type: "quality", options: { value: 82 } }],
+      [{ type: "flatten", options: { background: "ffffff" } }, { type: "resize", options: { width: 64, fit: "inside" } }]
+    ]) {
+      // The last route uses a tall original whose width-only output is >64px high.
+      const source = operations.length === 2 && operations[1].type === "resize"
+        ? media.oriented.source : media.scanTif.source;
+      const response = await fetch(`${baseUrl}${servicePath(source, config, { format: "jpg", operations })}`);
+      assert.equal(response.status, 413);
+    }
+  }, { environment: { MINICMS_IMAGE_MAX_EDGE: "64" } });
+
+  await withServer(async ({ baseUrl, config, media }) => {
+    // Both source edges fit, but its pixel count exceeds the output budget.
+    const route = servicePath(media.largeAlpha.source, config, { format: "png", operations: [
+      { type: "flatten", options: { alpha: "remove", background: "ffffff" } },
+      { type: "resize", options: { width: 32, fit: "inside" } }
+    ] });
+    const response = await fetch(`${baseUrl}${route}`);
+    assert.equal(response.status, 200);
+    const output = await sharp(Buffer.from(await response.arrayBuffer())).raw().toBuffer({ resolveWithObject: true });
+    assert.equal(output.info.width, 32);
+    assert.equal(output.info.height, 16);
+    assert.equal(output.info.channels, 3);
+    assert.deepEqual([...output.data.subarray(0, 3)], [220, 30, 40]);
+    const oversized = await fetch(`${baseUrl}${servicePath(media.largeAlpha.source, config, {
+      format: "png", operations: [{ type: "flatten", options: { background: "ffffff" } }]
+    })}`);
+    assert.equal(oversized.status, 413);
+  }, { largeRaster: true });
 });
 
 test("bounds oriented crop work while allowing a large source and small crop", async () => {
