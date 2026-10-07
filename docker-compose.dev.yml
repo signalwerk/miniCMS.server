@@ -1,0 +1,7 @@
+# docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+services:
+  minicms-server:
+    volumes:
+      - "./DATA:/data"
+    ports:
+      - "127.0.0.1:8787:8787"

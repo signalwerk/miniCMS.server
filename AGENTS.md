@@ -260,6 +260,15 @@ same change unless backward compatibility is explicitly requested.
 
 ## Commands
 
+For this checkout, `docker-compose.dev.yml` overrides `/data` with ignored
+`./DATA` and publishes `127.0.0.1:8787`. Use both Compose files and supply
+`MINICMS_SESSION_SECRET` as for production. The ignored executable
+`sync-data.sh` pulls `root@91.107.230.36:/DATA/miniCMS/backend/data/` into
+`./DATA/` via SSH port 22 and `~/.ssh/id_ed25519`; `--dry-run` previews it.
+It never writes remotely or deletes local-only files. Stop the local service
+before pulling; rsync replaces matching local files and is not an atomic
+snapshot of a production service that is actively receiving writes.
+
 Requires Node.js 24 or newer.
 
 ```sh
