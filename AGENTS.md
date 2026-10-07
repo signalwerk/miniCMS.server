@@ -78,6 +78,15 @@ same change unless backward compatibility is explicitly requested.
   `/data` and the bounded `/tmp` tmpfs are writable. The project root and
   `content/` themselves must be writable by UID 1000 (config saves and folder
   moves create files there); `/api/ready` fails otherwise.
+- Editor-only `image_rendering.flatten` on image fields and list/inspector
+  field references is validated by the pinned shared core. The browser requests
+  the existing flatten operation before its normal resize/quality operations;
+  no new API route or server-side default is needed. Preserve other libraries'
+  rendering settings when configuring OSPAAAL's white background.
+- Compose pins its default `MINICMS_ADMIN_SCRIPT_URL` to the immutable published
+  browser bundle. Bump this URL together with the immutable shared-core package
+  dependency after the miniCMS publication workflow succeeds. An explicit
+  deployment environment override still takes precedence.
 
 ## Security invariants
 

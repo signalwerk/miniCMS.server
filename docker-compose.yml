@@ -18,7 +18,7 @@ services:
       MINICMS_SESSION_SECRET: "${MINICMS_SESSION_SECRET:?Set MINICMS_SESSION_SECRET}"
       MINICMS_READ_TOKEN: "${MINICMS_READ_TOKEN:-}"
       MINICMS_IMAGE_CACHE_DIR: /data/.cache
-      MINICMS_ADMIN_SCRIPT_URL: "${MINICMS_ADMIN_SCRIPT_URL:-}"
+      MINICMS_ADMIN_SCRIPT_URL: "${MINICMS_ADMIN_SCRIPT_URL:-https://rawcdn.githack.com/signalwerk/miniCMS/d349006d9ef97062076c7beacdca5a98badd5278/minicms.js}"
     volumes:
       - "/DATA/miniCMS/backend/data:/data"
     tmpfs:
