@@ -22,6 +22,7 @@ const INPUT_FORMATS = new Set([
   "webp"
 ]);
 const SVG_PREFIX_BYTES = 128 * 1024;
+const MAX_INPUT_CHANNELS = 64;
 const CROP_GEOMETRY_EPSILON = 1e-7;
 const VERIFIED_SOURCE_LIMIT = 1024;
 const AVIF_BRANDS = new Set(["avif", "avis"]);
@@ -815,11 +816,11 @@ function validateOutputDimensions(metadata, operations, operational) {
   return dimensions;
 }
 
-function sharpInput(source, operational) {
+function sharpInput(source, operational, channels = MAX_INPUT_CHANNELS) {
   return sharp(source.path, {
     autoOrient: true,
     failOn: "warning",
-    limitInputChannels: 5,
+    limitInputChannels: channels,
     limitInputPixels: operational.maxInputPixels,
     pages: 1,
     sequentialRead: true,
@@ -837,7 +838,13 @@ async function rasterMetadata(source, operational, detectedFormat) {
   } catch {
     throw sourceError(415, "The media file is not a supported raster image.");
   }
-  if (!INPUT_FORMATS.has(metadata.format)) {
+  if (
+    metadata.format !== detectedFormat ||
+    !INPUT_FORMATS.has(metadata.format) ||
+    !Number.isSafeInteger(metadata.channels) ||
+    metadata.channels < 1 ||
+    metadata.channels > MAX_INPUT_CHANNELS
+  ) {
     throw sourceError(415, "The media file is not a supported raster image.");
   }
   orientedDimensions(metadata);
@@ -1000,7 +1007,7 @@ async function computeRaster(source, route, operational, detectedFormat) {
   const quality = route.operations.find((operation) => operation.type === "quality")
     ?.options.value;
   let image = applyOperations(
-    sharpInput(source, operational),
+    sharpInput(source, operational, metadata.channels),
     route.operations,
     metadata
   );

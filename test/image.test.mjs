@@ -16,6 +16,48 @@ import { createMediaRouter } from "../src/image/routes.mjs";
 const SVG_SOURCE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80"><script>alert(1)</script><rect width="120" height="80" fill="red"/></svg>`;
 const PADDED_SVG_SOURCE = `<!--${" ".repeat(70 * 1024)}-->${SVG_SOURCE}`;
 
+// Uncompressed CMYK TIFF with extra sample bands; Sharp's raw input accepts
+// at most four channels, so build this small fixture directly.
+function multichannelTiff(channels) {
+  const width = 12;
+  const height = 8;
+  const tags = 11;
+  const bitsOffset = 8 + 2 + tags * 12 + 4;
+  const extrasOffset = bitsOffset + channels * 2;
+  const pixelsOffset = extrasOffset + (channels - 4) * 2;
+  const pixelsLength = width * height * channels;
+  const buffer = Buffer.alloc(pixelsOffset + pixelsLength);
+  buffer.write("II");
+  buffer.writeUInt16LE(42, 2);
+  buffer.writeUInt32LE(8, 4);
+  buffer.writeUInt16LE(tags, 8);
+  const entries = [
+    [256, 4, 1, width],
+    [257, 4, 1, height],
+    [258, 3, channels, bitsOffset],
+    [259, 3, 1, 1],
+    [262, 3, 1, 5],
+    [273, 4, 1, pixelsOffset],
+    [277, 3, 1, channels],
+    [278, 4, 1, height],
+    [279, 4, 1, pixelsLength],
+    [284, 3, 1, 1],
+    [338, 3, channels - 4, channels - 4 <= 2 ? 0 : extrasOffset]
+  ];
+  entries.forEach(([tag, type, count, value], index) => {
+    const offset = 10 + index * 12;
+    buffer.writeUInt16LE(tag, offset);
+    buffer.writeUInt16LE(type, offset + 2);
+    buffer.writeUInt32LE(count, offset + 4);
+    buffer.writeUInt32LE(value, offset + 8);
+  });
+  for (let channel = 0; channel < channels; channel += 1) {
+    buffer.writeUInt16LE(8, bitsOffset + channel * 2);
+  }
+  buffer.fill(128, pixelsOffset);
+  return buffer;
+}
+
 function configSource({ schema = "images_v1" } = {}) {
   return `connectors:
   default:
@@ -126,6 +168,12 @@ async function makeFixture(options = {}) {
     path.join(mediaDir, "scan.tif"),
     path.join(mediaDir, "scan.tiff")
   );
+  await fs.writeFile(path.join(mediaDir, "six-channel.tif"), multichannelTiff(6));
+  await fs.writeFile(path.join(mediaDir, "eight-channel.tif"), multichannelTiff(8));
+  await fs.writeFile(path.join(mediaDir, "nine-channel.tif"), multichannelTiff(9));
+  await fs.writeFile(path.join(mediaDir, "twelve-channel.tif"), multichannelTiff(12));
+  await fs.writeFile(path.join(mediaDir, "sixteen-channel.tif"), multichannelTiff(16));
+  await fs.writeFile(path.join(mediaDir, "seventeen-channel.tif"), multichannelTiff(17));
   await sharp({
     create: {
       width: 2,
@@ -179,6 +227,12 @@ async function makeFixture(options = {}) {
     ["tagged", path.join(mediaDir, "tagged.jpg"), "tagged.jpg"],
     ["scanTif", path.join(mediaDir, "scan.tif"), "scan.tif"],
     ["scanTiff", path.join(mediaDir, "scan.tiff"), "scan.tiff"],
+    ["sixChannel", path.join(mediaDir, "six-channel.tif"), "six-channel.tif"],
+    ["eightChannel", path.join(mediaDir, "eight-channel.tif"), "eight-channel.tif"],
+    ["nineChannel", path.join(mediaDir, "nine-channel.tif"), "nine-channel.tif"],
+    ["twelveChannel", path.join(mediaDir, "twelve-channel.tif"), "twelve-channel.tif"],
+    ["sixteenChannel", path.join(mediaDir, "sixteen-channel.tif"), "sixteen-channel.tif"],
+    ["seventeenChannel", path.join(mediaDir, "seventeen-channel.tif"), "seventeen-channel.tif"],
     ["alpha", path.join(mediaDir, "alpha.png"), "alpha.png"],
     ["oriented", path.join(mediaDir, "oriented.jpg"), "oriented.jpg"],
     ["vector", path.join(mediaDir, "vector.svg"), "vector.svg"],
@@ -823,6 +877,39 @@ test("processes both TIF and TIFF source filenames", async () => {
     assert.equal(info.format, "tiff");
     assert.equal(info.width, 90);
     assert.equal(info.height, 60);
+  });
+});
+
+test("uses detected TIFF channels within a finite sixteen-channel ceiling", async () => {
+  await withServer(async ({ baseUrl, config, media }) => {
+    for (const [source, channels] of [
+      [media.sixChannel, 6],
+      [media.eightChannel, 8],
+      [media.nineChannel, 9],
+      [media.twelveChannel, 12],
+      [media.sixteenChannel, 16]
+    ]) {
+      const info = await fetch(
+        `${baseUrl}${servicePath(source.source, config, { info: true })}`
+      );
+      assert.equal(info.status, 200);
+      assert.equal((await info.json()).channels, channels);
+      const response = await fetch(`${baseUrl}${servicePath(source.source, config, {
+        width: 6, height: 6, format: "jpg"
+      })}`);
+      assert.equal(response.status, 200);
+      const output = await sharp(Buffer.from(await response.arrayBuffer())).metadata();
+      assert.equal(output.format, "jpeg");
+      assert.equal(output.width, 6);
+      assert.equal(output.height, 4);
+    }
+    for (const options of [{ info: true }, { width: 6, height: 6, format: "jpg" }]) {
+      const response = await fetch(
+        `${baseUrl}${servicePath(media.seventeenChannel.source, config, options)}`
+      );
+      assert.equal(response.status, 415);
+      await response.arrayBuffer();
+    }
   });
 });
 

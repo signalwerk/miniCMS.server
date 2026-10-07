@@ -104,7 +104,10 @@ the whole original. The service accepts only the shared helper's canonical
 serialization, validates
 every option, refuses path traversal/symlinks, bounds input and output pixels,
 requires a supported raster file signature before invoking Sharp, and
-processes only the first page/frame. Project `width` and `height` are
+processes only the first page/frame. Metadata inspection allows at most sixteen
+input channels; raster processing then uses the detected channel count as its
+limit. This supports CMYK TIFFs with extra sample bands while keeping decoding
+bounded. Project `width` and `height` are
 URL-builder defaults, so a later config change does not invalidate URLs from an
 older site build. The deployment-owned `MINICMS_IMAGE_MAX_*` settings are the
 server's hard limits. A `.json` suffix returns curated
