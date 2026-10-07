@@ -268,7 +268,7 @@ test("production serves its own public admin host while content stays protected"
     assert.equal(page.status, 200);
     assert.match(page.headers.get("content-type"), /text\/html/);
     const html = await page.text();
-    assert.match(html, /<script src="https:\/\/signalwerk\.github\.io\/miniCMS\/minicms\.js"><\/script>/);
+    assert.match(html, /<script src="https:\/\/rawcdn\.githack\.com\/signalwerk\/miniCMS\/[a-f0-9]{40}\/minicms\.js"><\/script>/);
     assert.match(html, /configUrl: "cms\.config\.yml"/);
 
     const config = await fetch(`${baseUrl}/admin/cms.config.yml`);
