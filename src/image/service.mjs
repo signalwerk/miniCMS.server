@@ -13,6 +13,7 @@ import {
   operationalImageConfiguration
 } from "./config.mjs";
 import { normalizeMediaReference, requestError } from "./url.mjs";
+import { withTiffPreviewSource } from "./tiff-preview.mjs";
 
 const INPUT_FORMATS = new Set([
   "avif",
@@ -831,6 +832,15 @@ function sharpInput(source, operational, channels = MAX_INPUT_CHANNELS) {
 }
 
 async function rasterMetadata(source, operational, detectedFormat) {
+  if (detectedFormat === "tiff") {
+    return withTiffPreviewSource(source, operational, prepared =>
+      rawRasterMetadata(prepared, operational, detectedFormat)
+    );
+  }
+  return rawRasterMetadata(source, operational, detectedFormat);
+}
+
+async function rawRasterMetadata(source, operational, detectedFormat) {
   if (!detectedFormat || !INPUT_FORMATS.has(detectedFormat)) {
     throw sourceError(415, "The media file is not a supported raster image.");
   }
@@ -1036,7 +1046,16 @@ function formatOutput(image, format, quality) {
 }
 
 async function computeRaster(source, route, operational, detectedFormat) {
-  const metadata = await rasterMetadata(source, operational, detectedFormat);
+  if (detectedFormat === "tiff") {
+    return withTiffPreviewSource(source, operational, prepared =>
+      computeRasterFromSource(prepared, route, operational, detectedFormat)
+    );
+  }
+  return computeRasterFromSource(source, route, operational, detectedFormat);
+}
+
+async function computeRasterFromSource(source, route, operational, detectedFormat) {
+  const metadata = await rawRasterMetadata(source, operational, detectedFormat);
   validateOutputDimensions(metadata, route.operations, operational);
   const quality = route.operations.find((operation) => operation.type === "quality")
     ?.options.value;

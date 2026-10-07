@@ -18,15 +18,15 @@ const PADDED_SVG_SOURCE = `<!--${" ".repeat(70 * 1024)}-->${SVG_SOURCE}`;
 
 // Uncompressed CMYK TIFF with extra sample bands; Sharp's raw input accepts
 // at most four channels, so build this small fixture directly.
-function multichannelTiff(channels, { masked = false } = {}) {
+function multichannelTiff(channels, { masked = false, layersBytes = 0 } = {}) {
   const width = 12;
   const height = 8;
-  const tags = 11;
+  const tags = layersBytes ? 12 : 11;
   const bitsOffset = 8 + 2 + tags * 12 + 4;
   const extrasOffset = bitsOffset + channels * 2;
   const pixelsOffset = extrasOffset + (channels - 4) * 2;
   const pixelsLength = width * height * channels;
-  const buffer = Buffer.alloc(pixelsOffset + pixelsLength);
+  const buffer = Buffer.alloc(pixelsOffset + pixelsLength + layersBytes);
   buffer.write("II");
   buffer.writeUInt16LE(42, 2);
   buffer.writeUInt32LE(8, 4);
@@ -44,6 +44,7 @@ function multichannelTiff(channels, { masked = false } = {}) {
     [284, 3, 1, 1],
     [338, 3, channels - 4, masked ? 2 : channels - 4 <= 2 ? 0 : extrasOffset]
   ];
+  if (layersBytes) entries.push([37724, 7, layersBytes, pixelsOffset + pixelsLength]);
   entries.forEach(([tag, type, count, value], index) => {
     const offset = 10 + index * 12;
     buffer.writeUInt16LE(tag, offset);
@@ -54,7 +55,7 @@ function multichannelTiff(channels, { masked = false } = {}) {
   for (let channel = 0; channel < channels; channel += 1) {
     buffer.writeUInt16LE(8, bitsOffset + channel * 2);
   }
-  buffer.fill(128, pixelsOffset);
+  buffer.fill(128, pixelsOffset, pixelsOffset + pixelsLength);
   if (masked) {
     for (let pixel = 0; pixel < width * height; pixel += 1) {
       const offset = pixelsOffset + pixel * channels;
@@ -229,8 +230,13 @@ async function makeFixture(options = {}) {
     "nested notes",
     "utf8"
   );
+  if (options.largeLayerData) {
+    await fs.writeFile(path.join(mediaDir, "layered-cmyk.tif"),
+      multichannelTiff(5, { masked: true, layersBytes: 30 * 1024 * 1024 }));
+  }
   const media = {};
   for (const [key, sourcePath, filename, collection = "images"] of [
+    ...(options.largeLayerData ? [["layeredCmyk", path.join(mediaDir, "layered-cmyk.tif"), "layered-cmyk.tif"]] : []),
     ["photo", path.join(mediaDir, "photo.jpg"), "photo.jpg"],
     ["pattern", path.join(mediaDir, "pattern.png"), "pattern.png"],
     ["tagged", path.join(mediaDir, "tagged.jpg"), "tagged.jpg"],
@@ -604,6 +610,31 @@ test("cosmetic filenames share one source, derivative, ETag, and cache entry", a
       ]
     );
   });
+});
+
+test("renders TIFFs with large Photoshop layer metadata without disabling decoder limits", async () => {
+  await withServer(async ({ baseUrl, config, media }) => {
+    const source = media.layeredCmyk;
+    const original = await fs.readFile(source.filePath);
+    const normalized = await sharp(original, { unlimited: true, limitInputChannels: 64 })
+      .removeAlpha().tiff({ compression: "lzw" }).toBuffer();
+    const expected = await sharp(normalized).flatten({ background: "#ffffff" })
+      .resize(6, 4, { fit: "inside" }).jpeg({ quality: 82 }).toBuffer();
+    const route = servicePath(source.source, config, { format: "jpg", operations: [
+      { type: "flatten", options: { alpha: "remove", background: "ffffff" } },
+      { type: "resize", options: { width: 6, height: 4, fit: "inside" } },
+      { type: "quality", options: { value: 82 } }
+    ] });
+    for (let index = 0; index < 2; index += 1) {
+      const response = await fetch(`${baseUrl}${route}`);
+      assert.equal(response.status, 200);
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()), expected);
+    }
+    const info = await fetch(`${baseUrl}${servicePath(source.source, config, { info: true })}`);
+    assert.equal(info.status, 200);
+    assert.equal((await info.json()).channels, 5);
+    assert.deepEqual(await fs.readFile(source.filePath), original);
+  }, { largeLayerData: true });
 });
 
 test("alpha removal restores masked CMYK colors with the legacy TIFF normalization", async () => {

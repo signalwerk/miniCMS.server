@@ -319,3 +319,12 @@ and rollback-safe file deletion.
   were unchanged. Before-config backup:
   `/private/tmp/minicms-local-config-before-alpha-fix.json`. Deploy this
   correction with production cache schema `v2` to regenerate immutable images.
+
+- TIFF previews now omit Adobe Photoshop layer-data tag 37724 from a private
+  temporary copy before metadata/decode. Embedded layer blobs can exhaust
+  libtiff's cumulative 50 MB allocation budget (Angola asset `24b4e4c04aecb2c920c162c37d5fc3128740c68621c6d55f13b83b2aceddf0e5`
+  has a 30,712,644-byte blob). Preserve every pixel/ICC/orientation/alpha tag
+  and source byte; retain `unlimited: false`. `src/image/tiff-preview.mjs`
+  supports bounded classic TIFF/BigTIFF directories in both byte orders and
+  cleans temporary copies on success/failure. Keep cache schema `v2`: previous
+  failed renders never published a derivative, and successful pixels are unchanged.
