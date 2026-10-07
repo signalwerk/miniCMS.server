@@ -295,3 +295,27 @@ Add filesystem behavior coverage to `test/api.test.mjs`, image security/cache
 coverage to `test/image.test.mjs`, and authentication or deployment-boundary
 coverage to `test/auth.test.mjs`. Preserve complete-record atomic persistence
 and rollback-safe file deletion.
+
+## Legacy alpha-mask rendering
+
+- Explicit `flatten@alpha:remove` uses a separate, bounded lossless TIFF
+  normalization before subsequent background compositing. Sharp runs flatten
+  before alpha removal inside a single pipeline; chaining both does not discard
+  the mask first. This reproduces `data.media`'s legacy TIFF roundtrip, including
+  its default sRGB conversion. Background-only and unconfigured rendering retain
+  their previous behavior. Input/channel/timeout limits remain enabled; the
+  intermediate stream has a finite byte bound derived from the input pixel limit.
+- Tony Evora Congo original `c8ada4c4698f60504c18b291e07034b2b18b3986391c0a5224626553a1be2c88`
+  is a 1741 × 2724 single-page CMYK TIFF with a fifth alpha-mask channel.
+  `test/image.test.mjs` uses a synthetic masked CMYK TIFF and RGB transparency
+  fixture to verify hidden colors survive explicit alpha removal. Bump the
+  project's `site.image_processing.cache.schema` when deploying this changed
+  rendering, since old derivatives and browser responses are immutable.
+- Local verification on 2026-10-07: all 91 server tests pass, including the
+  actual 64-channel input ceiling and rejection at 65. The development Docker
+  service was rebuilt and its config cache schema changed from `v1` to `v2`
+  through the authenticated API. Fresh and cached Congo JPEG bytes exactly
+  matched the reproduced legacy transform; 826 content file hashes/signatures
+  were unchanged. Before-config backup:
+  `/private/tmp/minicms-local-config-before-alpha-fix.json`. Deploy this
+  correction with production cache schema `v2` to regenerate immutable images.

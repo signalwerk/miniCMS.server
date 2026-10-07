@@ -18,7 +18,7 @@ const PADDED_SVG_SOURCE = `<!--${" ".repeat(70 * 1024)}-->${SVG_SOURCE}`;
 
 // Uncompressed CMYK TIFF with extra sample bands; Sharp's raw input accepts
 // at most four channels, so build this small fixture directly.
-function multichannelTiff(channels) {
+function multichannelTiff(channels, { masked = false } = {}) {
   const width = 12;
   const height = 8;
   const tags = 11;
@@ -42,7 +42,7 @@ function multichannelTiff(channels) {
     [278, 4, 1, height],
     [279, 4, 1, pixelsLength],
     [284, 3, 1, 1],
-    [338, 3, channels - 4, channels - 4 <= 2 ? 0 : extrasOffset]
+    [338, 3, channels - 4, masked ? 2 : channels - 4 <= 2 ? 0 : extrasOffset]
   ];
   entries.forEach(([tag, type, count, value], index) => {
     const offset = 10 + index * 12;
@@ -55,6 +55,12 @@ function multichannelTiff(channels) {
     buffer.writeUInt16LE(8, bitsOffset + channel * 2);
   }
   buffer.fill(128, pixelsOffset);
+  if (masked) {
+    for (let pixel = 0; pixel < width * height; pixel += 1) {
+      const offset = pixelsOffset + pixel * channels;
+      buffer.set([0, 128, 255, 0, pixel % width < width / 2 ? 0 : 255], offset);
+    }
+  }
   return buffer;
 }
 
@@ -168,12 +174,15 @@ async function makeFixture(options = {}) {
     path.join(mediaDir, "scan.tif"),
     path.join(mediaDir, "scan.tiff")
   );
+  await fs.writeFile(path.join(mediaDir, "masked-cmyk.tif"), multichannelTiff(5, { masked: true }));
   await fs.writeFile(path.join(mediaDir, "six-channel.tif"), multichannelTiff(6));
   await fs.writeFile(path.join(mediaDir, "eight-channel.tif"), multichannelTiff(8));
   await fs.writeFile(path.join(mediaDir, "nine-channel.tif"), multichannelTiff(9));
   await fs.writeFile(path.join(mediaDir, "twelve-channel.tif"), multichannelTiff(12));
   await fs.writeFile(path.join(mediaDir, "sixteen-channel.tif"), multichannelTiff(16));
   await fs.writeFile(path.join(mediaDir, "seventeen-channel.tif"), multichannelTiff(17));
+  await fs.writeFile(path.join(mediaDir, "sixty-four-channel.tif"), multichannelTiff(64));
+  await fs.writeFile(path.join(mediaDir, "sixty-five-channel.tif"), multichannelTiff(65));
   await sharp({
     create: {
       width: 2,
@@ -227,12 +236,15 @@ async function makeFixture(options = {}) {
     ["tagged", path.join(mediaDir, "tagged.jpg"), "tagged.jpg"],
     ["scanTif", path.join(mediaDir, "scan.tif"), "scan.tif"],
     ["scanTiff", path.join(mediaDir, "scan.tiff"), "scan.tiff"],
+    ["maskedCmyk", path.join(mediaDir, "masked-cmyk.tif"), "masked-cmyk.tif"],
     ["sixChannel", path.join(mediaDir, "six-channel.tif"), "six-channel.tif"],
     ["eightChannel", path.join(mediaDir, "eight-channel.tif"), "eight-channel.tif"],
     ["nineChannel", path.join(mediaDir, "nine-channel.tif"), "nine-channel.tif"],
     ["twelveChannel", path.join(mediaDir, "twelve-channel.tif"), "twelve-channel.tif"],
     ["sixteenChannel", path.join(mediaDir, "sixteen-channel.tif"), "sixteen-channel.tif"],
     ["seventeenChannel", path.join(mediaDir, "seventeen-channel.tif"), "seventeen-channel.tif"],
+    ["sixtyFourChannel", path.join(mediaDir, "sixty-four-channel.tif"), "sixty-four-channel.tif"],
+    ["sixtyFiveChannel", path.join(mediaDir, "sixty-five-channel.tif"), "sixty-five-channel.tif"],
     ["alpha", path.join(mediaDir, "alpha.png"), "alpha.png"],
     ["oriented", path.join(mediaDir, "oriented.jpg"), "oriented.jpg"],
     ["vector", path.join(mediaDir, "vector.svg"), "vector.svg"],
@@ -594,6 +606,49 @@ test("cosmetic filenames share one source, derivative, ETag, and cache entry", a
   });
 });
 
+test("alpha removal restores masked CMYK colors with the legacy TIFF normalization", async () => {
+  await withServer(async ({ baseUrl, config, media }) => {
+    const source = media.maskedCmyk;
+    const metadata = await sharp(source.filePath).metadata();
+    assert.equal(metadata.space, "cmyk");
+    assert.equal(metadata.channels, 5);
+    assert.equal(metadata.hasAlpha, true);
+    const normalized = await sharp(source.filePath)
+      .removeAlpha().tiff({ compression: "lzw" }).toBuffer();
+    const expected = await sharp(normalized).flatten({ background: "#ffffff" })
+      .resize(6, 4, { fit: "inside" }).raw().toBuffer();
+    const render = async (flatten, resize = true) => {
+      const operations = [];
+      if (flatten) operations.push({ type: "flatten", options: flatten });
+      if (resize) operations.push({ type: "resize", options: { width: 6, height: 4, fit: "inside" } });
+      if (!operations.length) operations.push({ type: "noop", options: {} });
+      const route = servicePath(source.source, config, { format: "png", operations });
+      const response = await fetch(`${baseUrl}${route}`);
+      assert.equal(response.status, 200);
+      return Buffer.from(await response.arrayBuffer());
+    };
+    for (const options of [{ alpha: "remove", background: "ffffff" }, { alpha: "remove" }]) {
+      const bytes = await render(options);
+      assert.equal((await sharp(bytes).metadata()).hasAlpha, false);
+      assert.deepEqual(await sharp(bytes).raw().toBuffer(), expected);
+    }
+    const backgroundOnly = await render({ background: "ffffff" }, false);
+    assert.deepEqual([...(await sharp(backgroundOnly).raw().toBuffer()).subarray(0, 3)], [255, 255, 255]);
+    const defaultBytes = await render(null, false);
+    assert.equal((await sharp(defaultBytes).metadata()).hasAlpha, true);
+    assert.equal((await sharp(defaultBytes).raw().toBuffer())[3], 0);
+
+    // RGB transparency must also be discarded when both options are given.
+    const route = servicePath(media.alpha.source, config, {
+      format: "png", operations: [{ type: "flatten", options: { alpha: "remove", background: "ffffff" } }]
+    });
+    const response = await fetch(`${baseUrl}${route}`);
+    assert.equal(response.status, 200);
+    const pixel = await sharp(Buffer.from(await response.arrayBuffer())).raw().toBuffer();
+    assert.deepEqual([...pixel.subarray(0, 3)], [220, 30, 40]);
+  });
+});
+
 test("applies ordered rotate, resize, flatten, and quality operations", async () => {
   await withServer(async ({ baseUrl, config, media }) => {
     const route = servicePath(media.photo.source, config, {
@@ -880,14 +935,16 @@ test("processes both TIF and TIFF source filenames", async () => {
   });
 });
 
-test("uses detected TIFF channels within a finite sixteen-channel ceiling", async () => {
+test("uses detected TIFF channels within a finite sixty-four-channel ceiling", async () => {
   await withServer(async ({ baseUrl, config, media }) => {
     for (const [source, channels] of [
       [media.sixChannel, 6],
       [media.eightChannel, 8],
       [media.nineChannel, 9],
       [media.twelveChannel, 12],
-      [media.sixteenChannel, 16]
+      [media.sixteenChannel, 16],
+      [media.seventeenChannel, 17],
+      [media.sixtyFourChannel, 64]
     ]) {
       const info = await fetch(
         `${baseUrl}${servicePath(source.source, config, { info: true })}`
@@ -905,7 +962,7 @@ test("uses detected TIFF channels within a finite sixteen-channel ceiling", asyn
     }
     for (const options of [{ info: true }, { width: 6, height: 6, format: "jpg" }]) {
       const response = await fetch(
-        `${baseUrl}${servicePath(media.seventeenChannel.source, config, options)}`
+        `${baseUrl}${servicePath(media.sixtyFiveChannel.source, config, options)}`
       );
       assert.equal(response.status, 415);
       await response.arrayBuffer();

@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { Writable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import sharp from "sharp";
 import { isRemoteCollection } from "@signalwerk/minicms/core/connectors";
 import { configuredMediaFolders } from "@signalwerk/minicms/core/media";
@@ -926,7 +928,33 @@ async function safeSvgMetadata(source) {
   };
 }
 
-function applyOperations(image, operations, metadata) {
+// Sharp flattens before removing alpha within one pipeline, regardless of
+// JavaScript call order. Materialize the legacy lossless TIFF normalization
+// first so an explicit alpha:remove discards masks rather than compositing them.
+async function discardAlpha(image, operational) {
+  const chunks = [];
+  let length = 0;
+  // TIFF output is 8-bit RGB by default. Allow bounded LZW/header overhead
+  // against the input pixel budget, not the much smaller derivative budget.
+  const maximumBytes = operational.maxInputPixels * 8 + 65536;
+  await pipeline(
+    image.removeAlpha().tiff({ compression: "lzw" }),
+    new Writable({
+      write(chunk, encoding, callback) {
+        length += chunk.length;
+        if (length > maximumBytes) {
+          callback(sourceError(413, "The normalized image is too large."));
+          return;
+        }
+        chunks.push(chunk);
+        callback();
+      }
+    })
+  );
+  return sharpInput({ path: Buffer.concat(chunks, length) }, operational);
+}
+
+async function applyOperations(image, operations, metadata, operational) {
   let transformed = image;
   let dimensions = orientedDimensions(metadata);
   for (let index = 0; index < operations.length; index += 1) {
@@ -977,6 +1005,12 @@ function applyOperations(image, operations, metadata) {
       dimensions = geometry.output;
       if (resize) index += 1;
     } else if (operation.type === "flatten") {
+      if (
+        options.alpha === "remove" &&
+        (metadata.hasAlpha || metadata.channels > (metadata.space === "cmyk" ? 4 : 3))
+      ) {
+        transformed = await discardAlpha(transformed, operational);
+      }
       if (options.background) {
         transformed = transformed.flatten({
           background: `#${options.background}`
@@ -1006,16 +1040,18 @@ async function computeRaster(source, route, operational, detectedFormat) {
   validateOutputDimensions(metadata, route.operations, operational);
   const quality = route.operations.find((operation) => operation.type === "quality")
     ?.options.value;
-  let image = applyOperations(
-    sharpInput(source, operational, metadata.channels),
-    route.operations,
-    metadata
-  );
-  image = formatOutput(image, route.format, quality);
   let result;
   try {
+    let image = await applyOperations(
+      sharpInput(source, operational, metadata.channels),
+      route.operations,
+      metadata,
+      operational
+    );
+    image = formatOutput(image, route.format, quality);
     result = await image.toBuffer({ resolveWithObject: true });
-  } catch {
+  } catch (error) {
+    if (error.status === 413) throw error;
     throw sourceError(422, "The image transformation could not be completed.");
   }
   if (
