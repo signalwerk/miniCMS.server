@@ -339,3 +339,14 @@ and rollback-safe file deletion.
   oversized outputs. All 98 server tests passed; local Docker returned fresh
   and cached 800 × 1180 JPEGs matching the legacy transform exactly. Deploy
   without raising input/output limits; keep the existing cache schema `v2`.
+
+- Default-region preview fix (2026-10-11): crop/flatten/inside-resize must fuse
+  the resize across intervening photometric flatten operations. Sharp supports
+  only one resize per pipeline; applying a later resize overwrote the rotated
+  crop patch resize and caused `extract_area: bad extract area`. Validation and
+  rendering now share resize lookahead and skip the consumed resize while still
+  applying flatten. Input/output bounds remain enabled. Regression tests cover
+  RGB/TIFF sources and cache hits (99 server tests pass). Image `6do4y9p9l49m7k7`
+  reproduced the failure at 640 × 480 bounds despite succeeding unresized; local
+  fix verified its preview. Previously failed URLs
+  have no derivative cache entry; successful crop pixels are unchanged.

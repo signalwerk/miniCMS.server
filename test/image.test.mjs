@@ -1675,3 +1675,26 @@ test("production authentication still protects mutations while public images rem
     await fs.rm(fixture.rootDir, { recursive: true, force: true });
   }
 });
+
+test("rotated crops fuse inside resizing across flatten without a second Sharp resize", async () => {
+  await withServer(async ({ baseUrl, config, media }) => {
+    const crop = {
+      type: "crop",
+      options: { left: 30, top: 20, width: 40, height: 35, rotation: -179 },
+    };
+    const flatten = { type: "flatten", options: { alpha: "remove", background: "ffffff" } };
+    const resize = { type: "resize", options: { width: 16, height: 12, fit: "inside" } };
+    for (const source of [media.pattern.source, media.scanTif.source]) {
+      const route = servicePath(source, config, { format: "png", operations: [crop, flatten, resize] });
+      const response = await fetch(`${baseUrl}${route}`);
+      assert.equal(response.status, 200);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      const metadata = await sharp(bytes).metadata();
+      assert.equal(metadata.width, 14);
+      assert.equal(metadata.height, 12);
+      const repeat = await fetch(`${baseUrl}${route}`);
+      assert.equal(repeat.status, 200);
+      assert.deepEqual(Buffer.from(await repeat.arrayBuffer()), bytes);
+    }
+  });
+});

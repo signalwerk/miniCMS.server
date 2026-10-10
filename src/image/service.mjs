@@ -774,20 +774,28 @@ function validateRequestedDimensions(operations, operational) {
   }
 }
 
+// Photometric steps do not prevent the crop's bounded inside-resize fusion.
+function cropResizeIndex(operations, cropIndex) {
+  let index = cropIndex + 1;
+  while (operations[index]?.type === "flatten") index += 1;
+  // Axis-aligned crops need no internal resize; preserve their existing alpha/color staging.
+  if (index > cropIndex + 1 && !(Number(operations[cropIndex].options.rotation || 0) % 360)) return -1;
+  return operations[index]?.type === "resize" && operations[index].options.fit === "inside" ? index : -1;
+}
+
 function validateOutputDimensions(metadata, operations, operational) {
   let dimensions = orientedDimensions(metadata);
+  let fusedResizeIndex = -1;
   for (let index = 0; index < operations.length; index += 1) {
+    if (index === fusedResizeIndex) continue;
     const operation = operations[index];
     // Flatten changes channels/background, not geometry. Its full-size input
     // is governed by maxInputPixels; a subsequent resize may yield a small
     // derivative. Still validate geometry operations and the final output.
     if (operation.type === "flatten") continue;
     if (operation.type === "crop") {
-      const resize =
-        operations[index + 1]?.type === "resize" &&
-        operations[index + 1].options.fit === "inside"
-          ? operations[index + 1].options
-          : null;
+      const resizeIndex = cropResizeIndex(operations, index);
+      const resize = resizeIndex < 0 ? null : operations[resizeIndex].options;
       const geometry = orientedCropGeometry(
         dimensions,
         operation.options,
@@ -802,7 +810,7 @@ function validateOutputDimensions(metadata, operations, operational) {
         }
       }
       dimensions = geometry.output;
-      if (resize) index += 1;
+      if (resize) fusedResizeIndex = resizeIndex;
     } else if (operation.type === "resize") {
       dimensions = resizedDimensions(
         dimensions.width,
@@ -974,7 +982,9 @@ async function discardAlpha(image, operational) {
 async function applyOperations(image, operations, metadata, operational) {
   let transformed = image;
   let dimensions = orientedDimensions(metadata);
+  let fusedResizeIndex = -1;
   for (let index = 0; index < operations.length; index += 1) {
+    if (index === fusedResizeIndex) continue;
     const operation = operations[index];
     const options = operation.options;
     if (operation.type === "resize") {
@@ -995,11 +1005,8 @@ async function applyOperations(image, operations, metadata, operational) {
         options.angle
       );
     } else if (operation.type === "crop") {
-      const resize =
-        operations[index + 1]?.type === "resize" &&
-        operations[index + 1].options.fit === "inside"
-          ? operations[index + 1].options
-          : null;
+      const resizeIndex = cropResizeIndex(operations, index);
+      const resize = resizeIndex < 0 ? null : operations[resizeIndex].options;
       const geometry = orientedCropGeometry(dimensions, options, resize);
       if (geometry.rotation) {
         transformed = transformed
@@ -1020,7 +1027,7 @@ async function applyOperations(image, operations, metadata, operational) {
         }
       }
       dimensions = geometry.output;
-      if (resize) index += 1;
+      if (resize) fusedResizeIndex = resizeIndex;
     } else if (operation.type === "flatten") {
       if (
         options.alpha === "remove" &&
