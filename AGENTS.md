@@ -350,3 +350,13 @@ and rollback-safe file deletion.
   reproduced the failure at 640 × 480 bounds despite succeeding unresized; local
   fix verified its preview. Previously failed URLs
   have no derivative cache entry; successful crop pixels are unchanged.
+
+- Admin client release (2026-10-11): default admin bundle pins published
+  gh-pages commit `9567e4ca09e9c6f2e635b47d0b2ce53e0fbd49eb`; the immutable
+  shared-core archive pins source `5c3fd3b2a27e568c8affa3534d5c80f5990ddae8`.
+  These include selected image regions, reference-aware deletion and restored
+  dark secondary buttons. All 99 server tests pass with that core. The sibling
+  ospaaal.neo script `scripts/update-admin-client.mjs --server-root PATH`
+  updates the project admin page and optional server bundle pin from published
+  gh-pages, verifies bundle availability and preserves other HTML. Core package
+  pins and deployment are separate explicit release steps.
