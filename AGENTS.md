@@ -394,3 +394,7 @@ and rollback-safe file deletion.
   dependency/image changes still require rebuilding. The watch setup and
   historical rendering audit notes were published together after all 99 API
   tests passed on 2026-10-11.
+- Ordered-image modal release (2026-10-11): the admin fallback bundle is
+  `fdcc705a107ea0052cdb54d5b35a754488ce67c6` (editor source `784f262`).
+  Edit/Add use a local-draft modal from the compact image list. This is an
+  editor-only release; core dependency, content and image cache stay unchanged.
