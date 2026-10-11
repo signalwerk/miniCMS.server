@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import express from "express";
 
-const DEFAULT_SCRIPT_URL = "https://rawcdn.githack.com/signalwerk/miniCMS/32a096e13efb502e6ce72862ee63a4acf89f5a6e/minicms.js";
+const DEFAULT_SCRIPT_URL = "https://rawcdn.githack.com/signalwerk/miniCMS/702977856bf4ca0169bd2b9dcbd2736b5d76d70e/minicms.js";
 
 function escapeAttribute(value) {
   return String(value)

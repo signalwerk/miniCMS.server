@@ -368,3 +368,11 @@ and rollback-safe file deletion.
   other libraries are unchanged. The browser supports upload/edit/reorder and
   decimal region inputs/Alt unsnapped rotation. No server rendering change or
   cache-schema bump is required. All 99 server tests pass with this core.
+
+- Configurable primary images (2026-10-11): core `bcbf860` and browser
+  `702977856bf4ca0169bd2b9dcbd2736b5d76d70e` add optional image-entry
+  `primary: true`. Only one entry may be selected. Shared selection uses it
+  or defaults to the first entry; editor sorting preserves selection and
+  removing the primary chooses the first remaining image. Previews/reference
+  crops and consumers share that selector. Existing content needs no rewrite.
+  All 99 server tests pass; derivative processing/cache schema is unchanged.
