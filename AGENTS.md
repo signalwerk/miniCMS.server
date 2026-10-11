@@ -360,3 +360,11 @@ and rollback-safe file deletion.
   updates the project admin page and optional server bundle pin from published
   gh-pages, verifies bundle availability and preserves other HTML. Core package
   pins and deployment are separate explicit release steps.
+
+- Ordered image fields release (2026-10-11): shared core pins `6fde216405f0e5a03e34a78ef8ed80af38a567f2`
+  and admin bundle pins `32a096e13efb502e6ce72862ee63a4acf89f5a6e`. `image` fields with
+  `multiple: true` validate an ordered array of complete assets with unique
+  entry IDs; storage discovery/cleanup includes every asset. Scalar images in
+  other libraries are unchanged. The browser supports upload/edit/reorder and
+  decimal region inputs/Alt unsnapped rotation. No server rendering change or
+  cache-schema bump is required. All 99 server tests pass with this core.
