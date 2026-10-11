@@ -340,6 +340,18 @@ and rollback-safe file deletion.
   and cached 800 × 1180 JPEGs matching the legacy transform exactly. Deploy
   without raising input/output limits; keep the existing cache schema `v2`.
 
+- Historical pixel matching needs the historical dependency runtime, not just
+  the old operation sequence in current Sharp. An audit found installed legacy
+  Sharp 0.34.3/libvips 8.17.1/LittleCMS 2.17 exactly reproduced consumer HEAD
+  pixels for three sources; current Sharp 0.35.3/libvips 8.18.3/LittleCMS 2.19.1
+  reproduced changed working-tree pixels. Untagged CMYK originals showed major
+  color shifts even though built-in CMYK profile bytes were identical. Do not
+  loosen consumer pixel tolerances. A proposed dependency alignment must retain
+  finite processing bounds, TIFF metadata preparation and alpha normalization,
+  pass the server suite, and use a fresh cache schema when published. This
+  investigation did not change dependencies or deploy code. Audit evidence:
+  `../ospaaal.neo/.migration-reports/processing-version-audit/`.
+
 - Default-region preview fix (2026-10-11): crop/flatten/inside-resize must fuse
   the resize across intervening photometric flatten operations. Sharp supports
   only one resize per pipeline; applying a later resize overwrote the rotated
@@ -376,3 +388,9 @@ and rollback-safe file deletion.
   removing the primary chooses the first remaining image. Previews/reference
   crops and consumers share that selector. Existing content needs no rewrite.
   All 99 server tests pass; derivative processing/cache schema is unchanged.
+
+- Local development uses Node watch mode in `npm run dev` and the Compose
+  development override. The override mounts `src/` and `bin/` read-only;
+  dependency/image changes still require rebuilding. The watch setup and
+  historical rendering audit notes were published together after all 99 API
+  tests passed on 2026-10-11.

@@ -261,6 +261,23 @@ and an ephemeral deployment filesystem will lose them.
 
 ### Docker Compose and Coolify
 
+For local development, start with the development override:
+
+```sh
+MINICMS_SESSION_SECRET="$(openssl rand -hex 32)" \
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
+
+Open `http://127.0.0.1:8787/admin/`. The override mounts `./DATA` at `/data`
+and mounts `src/` and `bin/` read-only. Node watch mode restarts the API when
+its entry point or imported server modules change; source edits no longer
+require rebuilding the image. `npm run dev` also runs in watch mode.
+Refresh the browser after a server restart. Sessions are in memory, so a
+restart requires signing in again. The Docker development override keeps
+authentication enabled; `npm run dev` is the loopback-only unauthenticated
+service. Changes to dependencies or the Dockerfile still require `up --build`.
+The admin browser bundle remains the configured published miniCMS bundle.
+
 The repository includes a production image and a Coolify-compatible
 `docker-compose.yml`. Configure these secrets in Coolify:
 

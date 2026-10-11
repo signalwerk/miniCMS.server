@@ -1,7 +1,10 @@
 # docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 services:
   minicms-server:
+    command: ["node", "--watch", "--watch-preserve-output", "./bin/minicms-api.mjs", "start", "--project-root", "/data"]
     volumes:
       - "./DATA:/data"
+      - "./src:/app/src:ro"
+      - "./bin:/app/bin:ro"
     ports:
       - "127.0.0.1:8787:8787"

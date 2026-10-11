@@ -8,7 +8,7 @@
     "minicms-api": "./bin/minicms-api.mjs"
   },
   "scripts": {
-    "dev": "node ./bin/minicms-api.mjs dev",
+    "dev": "node --watch --watch-preserve-output ./bin/minicms-api.mjs dev",
     "migrate:identity": "node ./bin/migrate-record-identity.mjs",
     "start": "node ./bin/minicms-api.mjs start",
     "test": "node --test test/*.test.mjs"
